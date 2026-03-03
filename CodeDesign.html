@@ -361,6 +361,7 @@
 
 <!-- Floating Nav -->
 <nav class="nav-float" x-data="{ open: true }">
+    <a href="index.html" style="color:var(--accent-green); font-weight:700; margin-bottom:0.5rem; display:block;">← 返回主页</a>
     <div @click="open = !open" style="cursor:pointer; font-weight:700; font-size:0.85rem; color:var(--accent-green); margin-bottom:0.5rem;">
         ☰ 导航 <span x-text="open ? '▾' : '▸'"></span>
     </div>

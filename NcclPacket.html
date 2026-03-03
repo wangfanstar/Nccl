@@ -83,6 +83,7 @@ table.ct tr:hover td{background:rgba(255,255,255,.02)}
 <body>
 
 <nav class="nav-f" x-data="{o:true}">
+<a href="index.html" style="color:var(--g);font-weight:700;margin-bottom:.5rem;display:block">← 返回主页</a>
 <div @click="o=!o" style="cursor:pointer;font-weight:700;color:var(--g);margin-bottom:.4rem">☰ 导航 <span x-text="o?'▾':'▸'"></span></div>
 <div x-show="o" x-transition>
 <a href="#hero">序</a>
