@@ -1,0 +1,1644 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NCCL 深度架构分析 — GPU通信的内核哲学</title>
+    <link rel="stylesheet" href="tailwind.css">
+    <script src="alpine.min.js" defer></script>
+    <script src="echarts.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap');
+        :root {
+            --bg-dark: #0a0e17;
+            --bg-card: #111827;
+            --bg-card-hover: #1a2332;
+            --accent-green: #22c55e;
+            --accent-blue: #3b82f6;
+            --accent-amber: #f59e0b;
+            --accent-red: #ef4444;
+            --accent-purple: #a855f7;
+            --accent-cyan: #06b6d4;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --border-subtle: #1e293b;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            font-family: 'Noto Serif SC', Georgia, serif;
+            line-height: 1.8;
+            overflow-x: hidden;
+        }
+        code, pre, .mono { font-family: 'JetBrains Mono', 'Consolas', monospace; }
+
+        /* Hero */
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+        .hero::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background:
+                radial-gradient(ellipse 60% 50% at 50% 30%, rgba(34,197,94,0.08) 0%, transparent 70%),
+                radial-gradient(ellipse 40% 40% at 80% 70%, rgba(59,130,246,0.06) 0%, transparent 60%),
+                radial-gradient(ellipse 40% 40% at 20% 80%, rgba(168,85,247,0.05) 0%, transparent 60%);
+            pointer-events: none;
+        }
+        .hero h1 {
+            font-size: 3.5rem;
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            background: linear-gradient(135deg, #22c55e, #3b82f6, #a855f7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 1rem;
+        }
+        .hero .subtitle {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            max-width: 700px;
+        }
+
+        /* Navigation */
+        .nav-float {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            z-index: 100;
+            background: rgba(17,24,39,0.92);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 0.75rem 1rem;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        .nav-float a {
+            display: block;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.8rem;
+            padding: 0.3rem 0;
+            transition: color 0.2s;
+        }
+        .nav-float a:hover { color: var(--accent-green); }
+
+        /* Sections */
+        .content-section {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 4rem 2rem;
+        }
+        .section-title {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 2rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid var(--accent-green);
+            display: inline-block;
+        }
+        .section-title .num {
+            color: var(--accent-green);
+            font-family: 'JetBrains Mono', monospace;
+            margin-right: 0.5rem;
+        }
+
+        /* Cards */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 1.5rem 2rem;
+            margin-bottom: 1.5rem;
+            transition: border-color 0.3s, transform 0.2s;
+        }
+        .card:hover {
+            border-color: rgba(34,197,94,0.3);
+            transform: translateY(-2px);
+        }
+        .card h3 {
+            font-size: 1.3rem;
+            margin-bottom: 0.75rem;
+            color: var(--accent-blue);
+        }
+        .card p, .card li {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+        .card ul { padding-left: 1.5rem; }
+        .card li { margin-bottom: 0.4rem; }
+
+        /* Insight boxes */
+        .insight {
+            background: linear-gradient(135deg, rgba(34,197,94,0.08), rgba(59,130,246,0.05));
+            border-left: 4px solid var(--accent-green);
+            border-radius: 0 12px 12px 0;
+            padding: 1.25rem 1.5rem;
+            margin: 1.5rem 0;
+        }
+        .insight .label {
+            color: var(--accent-green);
+            font-weight: 700;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 0.5rem;
+        }
+        .insight p { color: var(--text-secondary); font-size: 0.95rem; }
+
+        .warning {
+            background: linear-gradient(135deg, rgba(245,158,11,0.1), rgba(239,68,68,0.05));
+            border-left: 4px solid var(--accent-amber);
+            border-radius: 0 12px 12px 0;
+            padding: 1.25rem 1.5rem;
+            margin: 1.5rem 0;
+        }
+        .warning .label {
+            color: var(--accent-amber);
+            font-weight: 700;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 0.5rem;
+        }
+        .warning p { color: var(--text-secondary); font-size: 0.95rem; }
+
+        /* Code blocks */
+        .code-block {
+            background: #0d1117;
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: #c9d1d9;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+        .code-block .comment { color: #8b949e; }
+        .code-block .keyword { color: #ff7b72; }
+        .code-block .string { color: #a5d6ff; }
+        .code-block .func { color: #d2a8ff; }
+        .code-block .type { color: #79c0ff; }
+
+        /* Comparison table */
+        .cmp-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+            margin: 1rem 0;
+        }
+        .cmp-table th {
+            background: rgba(34,197,94,0.15);
+            color: var(--accent-green);
+            padding: 0.75rem 1rem;
+            text-align: left;
+            font-weight: 700;
+            border-bottom: 2px solid var(--accent-green);
+        }
+        .cmp-table td {
+            padding: 0.6rem 1rem;
+            border-bottom: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+        }
+        .cmp-table tr:hover td { background: rgba(255,255,255,0.03); }
+
+        /* Tags */
+        .tag {
+            display: inline-block;
+            padding: 0.15rem 0.6rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-right: 0.4rem;
+        }
+        .tag-green { background: rgba(34,197,94,0.15); color: var(--accent-green); }
+        .tag-blue { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+        .tag-amber { background: rgba(245,158,11,0.15); color: var(--accent-amber); }
+        .tag-red { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+        .tag-purple { background: rgba(168,85,247,0.15); color: var(--accent-purple); }
+        .tag-cyan { background: rgba(6,182,212,0.15); color: var(--accent-cyan); }
+
+        /* Timeline */
+        .timeline { position: relative; padding-left: 2rem; }
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 0.5rem;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: linear-gradient(to bottom, var(--accent-green), var(--accent-blue), var(--accent-purple));
+        }
+        .timeline-item {
+            position: relative;
+            margin-bottom: 2rem;
+        }
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -1.65rem;
+            top: 0.5rem;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--accent-green);
+            border: 2px solid var(--bg-dark);
+        }
+        .timeline-item .year {
+            color: var(--accent-green);
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 700;
+            font-size: 0.9rem;
+        }
+
+        /* Chart containers */
+        .chart-container {
+            width: 100%;
+            height: 400px;
+            margin: 1.5rem 0;
+        }
+
+        /* Tabs */
+        .tab-btn {
+            padding: 0.5rem 1.2rem;
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px 8px 0 0;
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+        .tab-btn.active, .tab-btn:hover {
+            background: var(--bg-card);
+            color: var(--accent-green);
+            border-color: var(--accent-green);
+        }
+        .tab-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 0 12px 12px 12px;
+            padding: 1.5rem;
+        }
+
+        /* Flow diagram (CSS only) */
+        .flow-row {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            margin: 0.75rem 0;
+        }
+        .flow-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 0.5rem 1rem;
+            font-size: 0.85rem;
+            white-space: nowrap;
+        }
+        .flow-arrow {
+            color: var(--accent-green);
+            font-size: 1.2rem;
+        }
+
+        /* Grid layouts */
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.5rem; }
+        @media (max-width: 768px) {
+            .grid-2, .grid-3 { grid-template-columns: 1fr; }
+            .hero h1 { font-size: 2rem; }
+            .nav-float { display: none; }
+            .content-section { padding: 2rem 1rem; }
+        }
+
+        /* Scroll animation */
+        .fade-in {
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity 0.6s ease, transform 0.6s ease;
+        }
+        .fade-in.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* Blockquote style */
+        .deep-thought {
+            border-left: 3px solid var(--accent-purple);
+            padding: 1rem 1.5rem;
+            margin: 1.5rem 0;
+            background: rgba(168,85,247,0.05);
+            border-radius: 0 8px 8px 0;
+            font-style: italic;
+            color: var(--text-secondary);
+        }
+        .deep-thought strong { color: var(--accent-purple); font-style: normal; }
+
+        .separator {
+            border: none;
+            border-top: 1px solid var(--border-subtle);
+            margin: 3rem 0;
+        }
+    </style>
+</head>
+<body>
+
+<!-- Floating Nav -->
+<nav class="nav-float" x-data="{ open: true }">
+    <div @click="open = !open" style="cursor:pointer; font-weight:700; font-size:0.85rem; color:var(--accent-green); margin-bottom:0.5rem;">
+        ☰ 导航 <span x-text="open ? '▾' : '▸'"></span>
+    </div>
+    <div x-show="open" x-transition>
+        <a href="#hero">序</a>
+        <a href="#sec1">一、是什么</a>
+        <a href="#sec2">二、历史沿革</a>
+        <a href="#sec3">三、代码架构</a>
+        <a href="#sec4">四、核心机制</a>
+        <a href="#sec5">五、协议三重奏</a>
+        <a href="#sec6">六、传输层</a>
+        <a href="#sec7">七、集合通信算法</a>
+        <a href="#sec8">八、与其他技术对比</a>
+        <a href="#sec9">九、理解要点</a>
+        <a href="#sec10">十、注意要点</a>
+        <a href="#sec11">十一、结语</a>
+    </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero" id="hero">
+    <div style="position:relative; z-index:1;">
+        <h1>NCCL 深度架构分析</h1>
+        <p class="subtitle">
+            从 TCP/IP 协议栈的视角理解 GPU 通信——它不是什么高深莫测的新物种，<br>
+            它就是一个经典分层通信系统在 GPU 世界的重新演绎。
+        </p>
+        <div style="margin-top:2rem; display:flex; gap:0.5rem; justify-content:center; flex-wrap:wrap;">
+            <span class="tag tag-green">GPU通信</span>
+            <span class="tag tag-blue">集合通信</span>
+            <span class="tag tag-amber">Ring/Tree</span>
+            <span class="tag tag-purple">NVLink</span>
+            <span class="tag tag-cyan">RDMA</span>
+            <span class="tag tag-red">内核哲学</span>
+        </div>
+        <p style="margin-top:3rem; color:var(--text-secondary); font-size:0.85rem;">↓ 向下滚动开始阅读 ↓</p>
+    </div>
+</section>
+
+<!-- Section 1: What is NCCL -->
+<section class="content-section fade-in" id="sec1">
+    <h2 class="section-title"><span class="num">01</span>NCCL 是什么——先把概念砸实</h2>
+
+    <p style="color:var(--text-secondary); margin-bottom:1.5rem;">
+        NCCL (NVIDIA Collective Communication Library，读作 "Nickel") 是 NVIDIA 开源的、专门面向 GPU 集群的集合通信库。
+        它本质上做一件事：<strong style="color:var(--accent-green);">让多块 GPU 之间高效地搬运和归约数据</strong>。
+    </p>
+
+    <div class="deep-thought">
+        <strong>底层直觉：</strong>你可以把 NCCL 类比为 GPU 世界的 TCP/IP 协议栈。TCP/IP 解决了 "异构网络中任意两台机器怎么可靠通信" 的问题，
+        NCCL 解决的是 "异构互连拓扑中多块 GPU 怎么做集合通信" 的问题。两者都要做拓扑发现、路径选择、分层协议、流水线传输。
+        区别在于，NCCL 的 "网卡" 是 GPU SM，它的 "内核线程" 是 CUDA warp。
+    </div>
+
+    <div class="grid-2">
+        <div class="card">
+            <h3>五大集合操作</h3>
+            <ul>
+                <li><strong>AllReduce</strong> — 所有 GPU 归约求和，结果分发给所有 GPU（深度学习梯度同步的核心）</li>
+                <li><strong>Broadcast</strong> — 从一个 GPU 广播数据到所有 GPU</li>
+                <li><strong>Reduce</strong> — 所有 GPU 的数据归约到一个 GPU</li>
+                <li><strong>AllGather</strong> — 每个 GPU 收集所有 GPU 的数据</li>
+                <li><strong>ReduceScatter</strong> — 归约后将结果分散到各 GPU</li>
+            </ul>
+        </div>
+        <div class="card">
+            <h3>核心设计哲学</h3>
+            <ul>
+                <li><strong>GPU-centric</strong>：通信和计算融合在同一个 CUDA Kernel 中，不是 CPU 发起的 memcpy</li>
+                <li><strong>拓扑感知</strong>：自动检测 NVLink / PCIe / InfiniBand 拓扑，选择最优路径</li>
+                <li><strong>单一内核</strong>：一个集合操作 = 一次 kernel launch，内部用 Channel 并行</li>
+                <li><strong>流水线</strong>：Channel → Slot → Chunk 三级流水，最大化吞吐</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="insight">
+        <div class="label">📌 关键洞察</div>
+        <p>
+            MPI 时代的集合通信是 "CPU 指挥 GPU 搬砖"——CPU 发起 DMA，GPU 等通知，来回切换。
+            NCCL 的革命性在于把整个通信逻辑塞进了 GPU Kernel——GPU 自己就是搬砖工、调度员和验收员。
+            这就像 Linux 内核里把快速路径全放到了 softirq 里做，避免了用户态-内核态的频繁切换。
+            <strong>减少一次上下文切换带来的收益，远大于优化一千行代码。</strong>
+        </p>
+    </div>
+</section>
+
+<!-- Section 2: History -->
+<section class="content-section fade-in" id="sec2">
+    <h2 class="section-title"><span class="num">02</span>历史沿革——为什么 NCCL 会长成这样</h2>
+
+    <p style="color:var(--text-secondary); margin-bottom:2rem;">
+        任何软件的当前架构都是历史选择的结果。理解 NCCL 为什么这么设计，比理解它怎么设计更重要。
+    </p>
+
+    <div class="timeline">
+        <div class="timeline-item">
+            <div class="year">2015 — NCCL 1.0</div>
+            <div class="card" style="margin-top:0.5rem;">
+                <p>最初由 NVIDIA 研究院发布。<strong>只有 Ring AllReduce</strong>，只支持单机多卡。
+                当时深度学习刚开始需要多 GPU 训练，Baidu 的 Ring AllReduce 论文正在流行。
+                NCCL 1.0 本质上就是一个高度优化的 Ring AllReduce 实现——因为 Ring 对带宽利用率接近理论最优。</p>
+                <p style="margin-top:0.5rem;">
+                    <span class="tag tag-green">Ring</span>
+                    <span class="tag tag-blue">单机</span>
+                    <span class="tag tag-amber">NVLink P2P</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="timeline-item">
+            <div class="year">2017 — NCCL 2.0</div>
+            <div class="card" style="margin-top:0.5rem;">
+                <p>里程碑版本。<strong>支持多机多卡</strong>，引入了 InfiniBand / RoCE 后端。
+                这意味着 NCCL 需要处理一个全新的问题域：跨节点通信。
+                于是出现了 <code class="mono">proxy thread</code>（CPU 代理线程），因为 GPU 不能直接操作网卡，
+                需要 CPU 作为 "中间人" 提交 RDMA 操作。</p>
+                <p style="margin-top:0.5rem;">
+                    <span class="tag tag-green">多机</span>
+                    <span class="tag tag-blue">RDMA</span>
+                    <span class="tag tag-purple">Proxy Thread</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="timeline-item">
+            <div class="year">2019 — NCCL 2.4+</div>
+            <div class="card" style="margin-top:0.5rem;">
+                <p>引入 <strong>Tree AllReduce（双二叉树）</strong>。Ring 在大规模场景下延迟随节点数线性增长，
+                    而 Tree 的延迟是 O(log N)。这就是经典的 "带宽 vs 延迟" 权衡：Ring 带宽利用率高但延迟高，
+                    Tree 延迟低但带宽利用率稍低。NCCL 的做法是<strong>两者都支持，运行时自动选择</strong>。</p>
+                <p style="margin-top:0.5rem;">
+                    <span class="tag tag-amber">Tree</span>
+                    <span class="tag tag-red">Double Binary Tree</span>
+                    <span class="tag tag-cyan">自动选择</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="timeline-item">
+            <div class="year">2020–2022 — NCCL 2.8~2.15</div>
+            <div class="card" style="margin-top:0.5rem;">
+                <p>持续优化。引入 <strong>CollNet（SHARP 网内计算）、NVLS（NVSwitch 加速）</strong>。
+                    支持 CUDA Graph。NVSwitch 的出现让单机 8 卡之间可以 all-to-all 直连，
+                    NCCL 针对这种 "全连接" 拓扑做了专门优化。</p>
+                <p style="margin-top:0.5rem;">
+                    <span class="tag tag-purple">NVSwitch</span>
+                    <span class="tag tag-green">SHARP</span>
+                    <span class="tag tag-blue">CUDA Graph</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="timeline-item">
+            <div class="year">2024 — NCCL 2.23+</div>
+            <div class="card" style="margin-top:0.5rem;">
+                <p>引入 <strong>PAT (Parallel Aggregated Trees)</strong> 算法，用于大规模集群下的 AllGather 和 ReduceScatter。
+                    这是第一次突破了纯 Ring/Tree 的范式——PAT 实际上是 Tree 的并行化变体，
+                    通过多棵树并行运行来提高大规模下的带宽利用。同时引入了新的 Bootstrap 初始化机制，减少了通信器创建时间。</p>
+                <p style="margin-top:0.5rem;">
+                    <span class="tag tag-red">PAT</span>
+                    <span class="tag tag-amber">大规模</span>
+                    <span class="tag tag-cyan">新 Bootstrap</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="timeline-item">
+            <div class="year">2025 — NCCL 2.28+</div>
+            <div class="card" style="margin-top:0.5rem;">
+                <p>引入 <strong>Device-Initiated Communication（设备发起通信）</strong>，允许用户 CUDA Kernel 直接调用 NCCL 通信原语，
+                    不再需要从 Host 端发起。这是 NCCL 从 "库" 向 "运行时" 演进的关键一步。
+                    同时持续优化网络可靠性和可观测性。</p>
+                <p style="margin-top:0.5rem;">
+                    <span class="tag tag-green">Device API</span>
+                    <span class="tag tag-purple">IBGDA</span>
+                    <span class="tag tag-blue">可观测性</span>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <div class="deep-thought">
+        <strong>历史的教训：</strong>NCCL 的演化路径完美体现了一个工程真理——<strong>先让最常见的 case 跑到极致，再扩展到一般情况</strong>。
+        1.0 只做 Ring 是因为当时 90% 的需求就是 AllReduce；2.0 加多机是因为模型开始放不进一台机器了；
+        加 Tree 是因为 Ring 在大规模下延迟扛不住了。每一步演进都是被真实需求驱动的，不是 "设计模式" 驱动的。
+        这和 Linux 内核的发展理念完全一致：<em>"Talk is cheap, show me the benchmark."</em>
+    </div>
+
+    <div id="timeline-chart" class="chart-container"></div>
+</section>
+
+<!-- Section 3: Code Architecture -->
+<section class="content-section fade-in" id="sec3">
+    <h2 class="section-title"><span class="num">03</span>代码架构——像解剖内核一样解剖 NCCL</h2>
+
+    <p style="color:var(--text-secondary); margin-bottom:1.5rem;">
+        NCCL 的源码结构非常清晰，典型的分层架构。我们从 <code class="mono">src/</code> 目录开始拆解。
+    </p>
+
+    <div class="card">
+        <h3>📂 目录结构总览</h3>
+        <div class="code-block">
+<span class="comment">// NCCL 源码核心目录（基于 NCCL 2.19+ 版本）</span>
+src/
+├── <span class="keyword">nccl.h.in</span>         <span class="comment">// API 定义（对外接口）</span>
+├── <span class="keyword">init.cc</span>           <span class="comment">// 通信器初始化（ncclCommInitRank 入口）</span>
+├── <span class="keyword">enqueue.cc</span>        <span class="comment">// 操作入队（集合操作 → CUDA Kernel 的桥梁）</span>
+├── <span class="keyword">group.cc</span>          <span class="comment">// Group 管理（ncclGroupStart/End）</span>
+├── <span class="keyword">bootstrap.cc</span>      <span class="comment">// Bootstrap 网络（rank 间初始连接建立）</span>
+├── <span class="keyword">channel.cc</span>        <span class="comment">// Channel 管理</span>
+├── <span class="keyword">transport.cc</span>      <span class="comment">// 传输层抽象</span>
+├── transport/
+│   ├── <span class="type">p2p.cc</span>        <span class="comment">// P2P 传输（NVLink / PCIe）</span>
+│   ├── <span class="type">shm.cc</span>        <span class="comment">// 共享内存传输</span>
+│   ├── <span class="type">net.cc</span>        <span class="comment">// 网络传输抽象层</span>
+│   ├── <span class="type">net_ib.cc</span>     <span class="comment">// InfiniBand RDMA 传输</span>
+│   ├── <span class="type">net_socket.cc</span> <span class="comment">// TCP Socket 传输</span>
+│   ├── <span class="type">nvls.cc</span>       <span class="comment">// NVSwitch 传输</span>
+│   └── <span class="type">coll_net.cc</span>   <span class="comment">// CollNet（SHARP）传输</span>
+├── <span class="keyword">graph/</span>            <span class="comment">// 拓扑图构建与搜索</span>
+│   ├── <span class="type">topo.cc</span>       <span class="comment">// 硬件拓扑检测</span>
+│   ├── <span class="type">search.cc</span>     <span class="comment">// Ring/Tree 路径搜索</span>
+│   ├── <span class="type">paths.cc</span>      <span class="comment">// 路径计算与代价评估</span>
+│   └── <span class="type">connect.cc</span>    <span class="comment">// Channel 连接建立</span>
+├── <span class="keyword">device/</span>           <span class="comment">// GPU 端代码（CUDA Kernel）</span>
+│   ├── <span class="type">common.cu</span>     <span class="comment">// 通用 kernel 入口</span>
+│   ├── <span class="type">prims_simple.h</span>    <span class="comment">// Simple 协议原语</span>
+│   ├── <span class="type">prims_ll.h</span>        <span class="comment">// LL 协议原语</span>
+│   ├── <span class="type">prims_ll128.h</span>     <span class="comment">// LL128 协议原语</span>
+│   ├── <span class="type">all_reduce.h</span>      <span class="comment">// AllReduce 算法实现</span>
+│   ├── <span class="type">broadcast.h</span>       <span class="comment">// Broadcast 实现</span>
+│   ├── <span class="type">reduce.h</span>          <span class="comment">// Reduce 实现</span>
+│   ├── <span class="type">all_gather.h</span>      <span class="comment">// AllGather 实现</span>
+│   └── <span class="type">reduce_scatter.h</span>  <span class="comment">// ReduceScatter 实现</span>
+├── <span class="keyword">misc/</span>             <span class="comment">// 工具函数</span>
+└── <span class="keyword">include/</span>          <span class="comment">// 内部头文件</span>
+        </div>
+    </div>
+
+    <div class="insight">
+        <div class="label">📌 架构洞察</div>
+        <p>
+            这个目录结构暴露了 NCCL 的核心分层思想，和 Linux 网络协议栈何其相似：
+            <code class="mono">device/</code> 就是 "网卡驱动"（数据面），
+            <code class="mono">transport/</code> 就是 "传输层"（TCP/UDP），
+            <code class="mono">graph/</code> 就是 "路由层"（IP），
+            <code class="mono">init.cc + bootstrap.cc</code> 就是 "控制面"（ARP + BGP）。
+            集合操作（AllReduce 等）则相当于 "应用层协议"。
+        </p>
+    </div>
+
+    <h3 style="margin-top:2rem; margin-bottom:1rem; color:var(--accent-blue);">分层架构图</h3>
+
+    <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:12px; padding:2rem; text-align:center;">
+        <div style="display:flex; flex-direction:column; gap:0.5rem; max-width:700px; margin:0 auto;">
+            <div style="background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); border-radius:8px; padding:0.75rem; font-weight:700; color:var(--accent-purple);">
+                应用层：PyTorch / TensorFlow / DeepSpeed
+            </div>
+            <div style="color:var(--accent-green); font-size:0.8rem;">↕ ncclAllReduce() / ncclSend() / ncclRecv()</div>
+            <div style="background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.3); border-radius:8px; padding:0.75rem; font-weight:700; color:var(--accent-blue);">
+                API 层：init.cc / enqueue.cc / group.cc
+            </div>
+            <div style="color:var(--accent-green); font-size:0.8rem;">↕ 算法选择 + Channel 分配</div>
+            <div style="background:rgba(34,197,94,0.15); border:1px solid rgba(34,197,94,0.3); border-radius:8px; padding:0.75rem; font-weight:700; color:var(--accent-green);">
+                算法层：Ring / Tree / PAT / CollNet / NVLS
+            </div>
+            <div style="color:var(--accent-green); font-size:0.8rem;">↕ 通信原语 (send, recv, recvReduceSend, ...)</div>
+            <div style="background:rgba(245,158,11,0.15); border:1px solid rgba(245,158,11,0.3); border-radius:8px; padding:0.75rem; font-weight:700; color:var(--accent-amber);">
+                协议层：Simple / LL / LL128
+            </div>
+            <div style="color:var(--accent-green); font-size:0.8rem;">↕ buffer 管理 + 同步机制</div>
+            <div style="background:rgba(239,68,68,0.15); border:1px solid rgba(239,68,68,0.3); border-radius:8px; padding:0.75rem; font-weight:700; color:var(--accent-red);">
+                传输层：P2P (NVLink/PCIe) / SHM / NET (IB/Socket) / NVLS
+            </div>
+            <div style="color:var(--accent-green); font-size:0.8rem;">↕ GPU SM / CPU Proxy Thread / NIC</div>
+            <div style="background:rgba(6,182,212,0.15); border:1px solid rgba(6,182,212,0.3); border-radius:8px; padding:0.75rem; font-weight:700; color:var(--accent-cyan);">
+                硬件层：NVLink / NVSwitch / PCIe / InfiniBand / RoCE / TCP
+            </div>
+        </div>
+    </div>
+
+    <div class="deep-thought" style="margin-top:1.5rem;">
+        <strong>为什么是这种分层？</strong>因为没有分层的替代方案能同时满足三个需求：
+        ① 支持多种硬件拓扑（NVLink 和 PCIe 和 IB 行为差异巨大）；
+        ② 支持多种算法（Ring/Tree 对延迟和带宽的取舍不同）；
+        ③ 支持多种协议（大消息和小消息的同步开销天差地别）。
+        分层让每一层可以独立变化。这和 OSI 七层模型的设计动机一模一样——<strong>解耦变化的维度</strong>。
+    </div>
+</section>
+
+<!-- Section 4: Core Mechanisms -->
+<section class="content-section fade-in" id="sec4">
+    <h2 class="section-title"><span class="num">04</span>核心机制——Channel、Slot、Chunk 的流水线</h2>
+
+    <p style="color:var(--text-secondary); margin-bottom:1.5rem;">
+        NCCL 的性能秘密藏在三级流水线设计中。这是理解 NCCL 所有后续内容的基础。
+    </p>
+
+    <div class="card">
+        <h3>三级流水线：Channel → Loop → Slot/Chunk</h3>
+        <p>当你调用 <code class="mono">ncclAllReduce()</code> 时，数据经历以下分解过程：</p>
+        <ol style="padding-left:1.5rem; margin-top:1rem;">
+            <li><strong style="color:var(--accent-green);">Channel 并行</strong>：数据被均匀切分到 N 个 Channel，每个 Channel 独占一个 CUDA Block（运行在一个 SM 上）。Channel 之间完全独立并行。</li>
+            <li style="margin-top:0.5rem;"><strong style="color:var(--accent-blue);">Loop 迭代</strong>：如果一个 Channel 分到的数据大于其缓冲区大小（Simple 协议下约 4MiB），数据会被拆成多个 Loop 迭代，依次处理。</li>
+            <li style="margin-top:0.5rem;"><strong style="color:var(--accent-amber);">Slot/Chunk 流水</strong>：每个 Loop 内部，缓冲区被分为 8 个 Slot（NCCL_STEPS=8）。每次传输一个 Chunk 大小的数据，占一个 Slot。多个 Slot 形成流水线，前一个 Chunk 还在传输时，后一个 Chunk 已经可以开始填充。</li>
+        </ol>
+    </div>
+
+    <table class="cmp-table">
+        <thead>
+            <tr>
+                <th>协议</th>
+                <th>Channel 总缓冲</th>
+                <th>每 Slot 容量</th>
+                <th>有效数据/Slot</th>
+                <th>Slot 数量</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><span class="tag tag-green">Simple</span></td>
+                <td class="mono">4 MiB</td>
+                <td class="mono">512 KiB</td>
+                <td class="mono">512 KiB</td>
+                <td class="mono">8</td>
+            </tr>
+            <tr>
+                <td><span class="tag tag-blue">LL</span></td>
+                <td class="mono">256 KiB</td>
+                <td class="mono">32 KiB</td>
+                <td class="mono">16 KiB</td>
+                <td class="mono">8</td>
+            </tr>
+            <tr>
+                <td><span class="tag tag-amber">LL128</span></td>
+                <td class="mono">~4800 KiB</td>
+                <td class="mono">600 KiB</td>
+                <td class="mono">562.5 KiB</td>
+                <td class="mono">8</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="insight">
+        <div class="label">📌 为什么是 8 个 Slot？</div>
+        <p>
+            8 个 Slot 不是随便选的。流水线深度需要在 "掩盖延迟" 和 "内存占用" 之间取平衡。
+            Slot 太少，流水线深度不够，发送方等接收方确认时会 stall；
+            Slot 太多，每个 Channel 需要更大的缓冲区。8 是一个工程经验值，
+            和 TCP 的滑动窗口思想本质相同——<strong>用缓冲换延迟</strong>。
+        </p>
+    </div>
+
+    <div class="deep-thought">
+        <strong>类比 Linux 网络栈：</strong>
+        Channel 类似 RSS（Receive Side Scaling）的多队列——把流量分散到多个 CPU 核心/SM 上并行处理，避免单核瓶颈。
+        Slot 类似 socket buffer 的滑动窗口——发送方不用等接收方 ACK 就能继续发，只要窗口没满。
+        Chunk 则类似 MTU/MSS——决定了每次实际搬运的数据粒度。
+        <strong>所有高性能通信系统都在做同一件事：并行化 + 流水化 + 合适的粒度。</strong>
+    </div>
+
+    <div id="pipeline-chart" class="chart-container"></div>
+</section>
+
+<!-- Section 5: Protocols -->
+<section class="content-section fade-in" id="sec5">
+    <h2 class="section-title"><span class="num">05</span>协议三重奏——Simple、LL、LL128</h2>
+
+    <p style="color:var(--text-secondary); margin-bottom:1.5rem;">
+        NCCL 的协议设计是它最精巧的部分之一。三种协议针对不同的消息大小和硬件条件做了截然不同的取舍。
+    </p>
+
+    <div x-data="{ tab: 'simple' }">
+        <div style="display:flex; gap:0.25rem; margin-bottom:0;">
+            <button class="tab-btn" :class="tab==='simple'&&'active'" @click="tab='simple'">Simple</button>
+            <button class="tab-btn" :class="tab==='ll'&&'active'" @click="tab='ll'">LL (Low Latency)</button>
+            <button class="tab-btn" :class="tab==='ll128'&&'active'" @click="tab='ll128'">LL128</button>
+        </div>
+        <div class="tab-panel">
+            <div x-show="tab==='simple'">
+                <h3 style="color:var(--accent-green); margin-bottom:0.75rem;">Simple 协议——带宽为王</h3>
+                <div class="grid-2">
+                    <div>
+                        <p><strong>设计目标</strong>：最大化带宽利用率</p>
+                        <p style="margin-top:0.5rem;"><strong>同步机制</strong>：Memory Fence（内存屏障）</p>
+                        <p style="margin-top:0.5rem;"><strong>传输单元</strong>：大 Chunk（512 KiB/Slot）</p>
+                        <p style="margin-top:0.5rem;"><strong>带宽利用率</strong>：接近峰值</p>
+                        <p style="margin-top:0.5rem;"><strong>每跳延迟</strong>：~6μs</p>
+                    </div>
+                    <div>
+                        <p><strong>工作原理</strong>：接收方必须等待一整个 Chunk 传输完毕后才能访问数据。Memory Fence 保证数据可见性和顺序一致性。</p>
+                        <p style="margin-top:0.5rem;"><strong>适用场景</strong>：大消息（通常 >256KB），带宽敏感的场景。</p>
+                        <p style="margin-top:0.5rem;"><strong>代价</strong>：Memory Fence 开销大，小消息时同步代价占比过高。</p>
+                    </div>
+                </div>
+            </div>
+            <div x-show="tab==='ll'">
+                <h3 style="color:var(--accent-blue); margin-bottom:0.75rem;">LL 协议——延迟为王</h3>
+                <div class="grid-2">
+                    <div>
+                        <p><strong>设计目标</strong>：最小化延迟</p>
+                        <p style="margin-top:0.5rem;"><strong>同步机制</strong>：Flag-based（标志位同步）</p>
+                        <p style="margin-top:0.5rem;"><strong>传输单元</strong>：4B 数据 + 4B 标志 = 8B 原子写</p>
+                        <p style="margin-top:0.5rem;"><strong>带宽利用率</strong>：25~50% 峰值</p>
+                        <p style="margin-top:0.5rem;"><strong>每跳延迟</strong>：~1μs</p>
+                    </div>
+                    <div>
+                        <p><strong>工作原理</strong>：每个 8 字节原子操作携带 4 字节数据和 4 字节标志。接收方通过检查标志位判断数据是否就绪，无需 Memory Fence。</p>
+                        <p style="margin-top:0.5rem;"><strong>关键限制</strong>：中间缓冲区必须在 Host 内存中（CPU 需要 poll 标志位来触发网络发送），无法使用 GPU Direct RDMA。</p>
+                        <p style="margin-top:0.5rem;"><strong>代价</strong>：50% 带宽浪费（一半是标志位），且无法利用 GDRDMA。</p>
+                    </div>
+                </div>
+            </div>
+            <div x-show="tab==='ll128'">
+                <h3 style="color:var(--accent-amber); margin-bottom:0.75rem;">LL128 协议——鱼与熊掌兼得的尝试</h3>
+                <div class="grid-2">
+                    <div>
+                        <p><strong>设计目标</strong>：低延迟 + 高带宽</p>
+                        <p style="margin-top:0.5rem;"><strong>同步机制</strong>：Flag-based（标志位同步）</p>
+                        <p style="margin-top:0.5rem;"><strong>传输单元</strong>：120B 数据 + 8B 标志 = 128B</p>
+                        <p style="margin-top:0.5rem;"><strong>带宽利用率</strong>：~95% 峰值</p>
+                        <p style="margin-top:0.5rem;"><strong>每跳延迟</strong>：~2μs</p>
+                    </div>
+                    <div>
+                        <p><strong>工作原理</strong>：利用 NVLink 的 128 字节原子写特性。120 字节有效数据 + 8 字节标志，一次原子操作传输。接收方检查标志位即可，兼顾了带宽和延迟。</p>
+                        <p style="margin-top:0.5rem;"><strong>关键限制</strong>：需要硬件支持 128 字节原子写（NVLink 支持，PCIe 不支持）。在 PCIe 系统上 LL128 会被自动禁用。</p>
+                        <p style="margin-top:0.5rem;"><strong>跨节点</strong>：网络路径退化为类似 Simple 的行为（先聚集再发送）。</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="deep-thought" style="margin-top:1.5rem;">
+        <strong>协议设计的深层逻辑：</strong>
+        Simple 用 Memory Fence 做同步，相当于 TCP 的 "停等协议"——可靠但慢；
+        LL 用 Flag 做同步，相当于把 ACK 嵌进了数据包本身——快但浪费带宽；
+        LL128 是 LL 的 "巨帧" 版本——利用了 NVLink 128B 原子写这个 "天然 MTU"。
+        <br><br>
+        这里的关键洞察是：<strong>同步机制的选择决定了一切</strong>。Memory Fence 本质上是 "全局序列化点"，
+        它保证了前面所有写操作对后面所有读操作可见。这太重了。
+        Flag-based 同步把 "全局可见性" 收窄为 "单点可见性"——我只需要知道这一个特定的数据就绪了，
+        不需要等全世界都同步好。这和 Linux 内核中 RCU 替代读写锁的思路如出一辙：
+        <strong>精确化同步范围，是所有并发优化的终极武器。</strong>
+    </div>
+
+    <div id="protocol-chart" class="chart-container"></div>
+</section>
+
+<!-- Section 6: Transport Layer -->
+<section class="content-section fade-in" id="sec6">
+    <h2 class="section-title"><span class="num">06</span>传输层——数据是怎么搬运的</h2>
+
+    <p style="color:var(--text-secondary); margin-bottom:1.5rem;">
+        NCCL 的传输层处理 "数据实际从 GPU A 搬到 GPU B" 的物理过程。
+        这一层的复杂度远超想象，因为 GPU 之间的互连拓扑千差万别。
+    </p>
+
+    <div class="grid-2">
+        <div class="card">
+            <h3>🔀 节点内传输</h3>
+            <table class="cmp-table">
+                <thead><tr><th>传输方式</th><th>场景</th><th>机制</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><strong>P2P (NVLink)</strong></td>
+                        <td>GPU 有 NVLink 直连</td>
+                        <td>GPU Direct P2P，GPU 直接读写对端显存</td>
+                    </tr>
+                    <tr>
+                        <td><strong>P2P (PCIe)</strong></td>
+                        <td>GPU 在同一 PCIe switch</td>
+                        <td>GPU Direct P2P over PCIe</td>
+                    </tr>
+                    <tr>
+                        <td><strong>P2P_DIRECT</strong></td>
+                        <td>同一进程内的 GPU</td>
+                        <td>直接指针访问，跳过 IPC handle，跳过中间 FIFO</td>
+                    </tr>
+                    <tr>
+                        <td><strong>SHM</strong></td>
+                        <td>P2P 不可用或跨 Socket</td>
+                        <td>通过 Host 共享内存中转</td>
+                    </tr>
+                    <tr>
+                        <td><strong>NVLS</strong></td>
+                        <td>有 NVSwitch</td>
+                        <td>NVLink SHARP，硬件加速归约</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="card">
+            <h3>🌐 节点间传输</h3>
+            <table class="cmp-table">
+                <thead><tr><th>传输方式</th><th>场景</th><th>机制</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><strong>IB Verbs + GDRDMA</strong></td>
+                        <td>GPU 和 NIC 同一 PCIe switch</td>
+                        <td>NIC 直读/写 GPU 显存，零拷贝</td>
+                    </tr>
+                    <tr>
+                        <td><strong>IB Verbs</strong></td>
+                        <td>有 IB/RoCE 但无 GDRDMA</td>
+                        <td>GPU→Host→RDMA→Host→GPU</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Socket</strong></td>
+                        <td>只有 TCP/IP 网络</td>
+                        <td>GPU→Host→Socket→Host→GPU</td>
+                    </tr>
+                    <tr>
+                        <td><strong>CollNet (SHARP)</strong></td>
+                        <td>交换机支持 SHARP</td>
+                        <td>归约操作卸载到交换机硬件</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card" style="margin-top:1rem;">
+        <h3>🔧 Proxy Thread——NCCL 跨节点通信的幕后英雄</h3>
+        <p>GPU 不能直接操作网卡（IB Verbs 是 CPU 端 API），所以 NCCL 在 CPU 端维护了 <strong>Proxy Thread</strong>：</p>
+        <div class="flow-row" style="margin-top:1rem;">
+            <div class="flow-box" style="border-color:var(--accent-green);">GPU Kernel<br><small>写数据到 buffer</small></div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-box" style="border-color:var(--accent-amber);">Proxy Thread<br><small>检测 buffer 就绪</small></div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-box" style="border-color:var(--accent-blue);">ibv_post_send<br><small>提交 RDMA 操作</small></div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-box" style="border-color:var(--accent-red);">NIC → 网络<br><small>RDMA Write</small></div>
+        </div>
+        <p style="margin-top:1rem;">每对 peer 之间建立 <strong>2 个 QP</strong>：前向 QP 传数据（RDMA_WRITE），反向 QP 传控制信号（CTS，clear-to-send）。这种分离设计避免了控制流被数据流阻塞。</p>
+    </div>
+
+    <div class="deep-thought">
+        <strong>传输层的哲学：</strong>NCCL 的传输层设计完美体现了 "fallback 思维"——
+        先尝试最快的路径（NVLink P2P Direct），不行就退到次优（NVLink P2P），
+        再不行就用 PCIe P2P，还不行就用共享内存，最后用网络。
+        这和 Linux 内核的内存分配器 (slab → buddy → vmalloc) 的 fallback 链条一模一样。
+        <strong>好的系统设计不是选择最优方案，而是建立一条从最优到最差的平滑退化路径。</strong>
+    </div>
+
+    <div class="warning">
+        <div class="label">⚠️ 陷阱：跨 Socket 的 PCIe P2P</div>
+        <p>
+            两个 GPU 分属不同 CPU Socket 时，PCIe P2P 数据需要穿越 CPU 间互连（如 UPI/xGMI），
+            产生的 P2P 数据包对 CPU 很不友好（CPU 要做地址翻译和路由）。
+            此时 NCCL 可能自动选择 SHM 传输，甚至通过本地 NIC 走 RDMA，
+            绕开 CPU 互连瓶颈。<strong>这就是为什么 nvidia-smi topo -m 的输出如此重要。</strong>
+        </p>
+    </div>
+</section>
+
+<!-- Section 7: Collective Algorithms -->
+<section class="content-section fade-in" id="sec7">
+    <h2 class="section-title"><span class="num">07</span>集合通信算法——Ring 与 Tree 的博弈</h2>
+
+    <p style="color:var(--text-secondary); margin-bottom:1.5rem;">
+        NCCL 的算法层将高级集合操作分解为低级通信原语，在 Ring 或 Tree 拓扑上流水执行。
+    </p>
+
+    <div class="grid-2">
+        <div class="card">
+            <h3>🔵 Ring AllReduce</h3>
+            <p>将 N 个 GPU 排列成逻辑环，分两个阶段：</p>
+            <ol style="padding-left:1.5rem; margin-top:0.5rem;">
+                <li><strong>Reduce-Scatter</strong>：数据分 N 块，沿环传递 N-1 步，每步做归约。结束后每个 GPU 持有 1/N 的最终结果。</li>
+                <li><strong>AllGather</strong>：沿环再传 N-1 步，每步转发已有的最终结果块。结束后所有 GPU 持有完整结果。</li>
+            </ol>
+            <p style="margin-top:0.75rem;"><strong>通信量</strong>：每个 GPU 发送 2×(N-1)/N × DataSize</p>
+            <p><strong>延迟</strong>：2×(N-1) 跳 → O(N)</p>
+            <p><span class="tag tag-green">带宽最优</span> <span class="tag tag-red">延迟 O(N)</span></p>
+        </div>
+        <div class="card">
+            <h3>🟢 Tree AllReduce (双二叉树)</h3>
+            <p>将 GPU 组织为二叉树，分两个阶段：</p>
+            <ol style="padding-left:1.5rem; margin-top:0.5rem;">
+                <li><strong>Reduce</strong>：叶子节点向根节点汇聚归约，每层做一次归约。</li>
+                <li><strong>Broadcast</strong>：根节点向叶子节点广播最终结果。</li>
+            </ol>
+            <p style="margin-top:0.75rem;"><strong>通信量</strong>：每个 GPU 发送 ~2 × DataSize</p>
+            <p><strong>延迟</strong>：2×log₂(N) 跳 → O(log N)</p>
+            <p style="margin-top:0.5rem;">NCCL 使用<strong>双二叉树</strong>来利用双向带宽——两棵互补的二叉树同时工作，确保每个 GPU 的上行和下行链路都被充分利用。</p>
+            <p><span class="tag tag-blue">延迟 O(logN)</span> <span class="tag tag-amber">带宽次优</span></p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>📊 通信原语——算法的基本积木</h3>
+        <p>所有集合操作都由以下原语组合而成：</p>
+        <table class="cmp-table">
+            <thead>
+                <tr><th>原语</th><th>操作</th><th>典型使用场景</th></tr>
+            </thead>
+            <tbody>
+                <tr><td class="mono">send</td><td>发送数据到下一跳</td><td>Broadcast 源节点</td></tr>
+                <tr><td class="mono">recv</td><td>接收来自上一跳的数据</td><td>Broadcast 非源节点</td></tr>
+                <tr><td class="mono">recvReduceSend</td><td>接收→归约→发送</td><td>Ring ReduceScatter 中间节点</td></tr>
+                <tr><td class="mono">recvCopySend</td><td>接收→拷贝到用户缓冲→转发</td><td>Ring AllGather 中间节点</td></tr>
+                <tr><td class="mono">recvReduceCopySend</td><td>接收→归约→拷贝→发送</td><td>Tree Reduce 非叶节点</td></tr>
+                <tr><td class="mono">directSend / directRecv</td><td>跳过中间 FIFO，直接访问对端缓冲</td><td>P2P_DIRECT 模式</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="insight">
+        <div class="label">📌 算法选择的决策逻辑</div>
+        <p>
+            NCCL 的 <code class="mono">enqueue.cc</code> 中有一个调优模型 (tuning model)，根据以下因素自动选择 Ring 还是 Tree：
+        </p>
+        <ul style="padding-left:1.5rem; margin-top:0.5rem;">
+            <li><strong>消息大小</strong>：小消息倾向 Tree（延迟敏感），大消息倾向 Ring（带宽敏感）</li>
+            <li><strong>GPU 数量</strong>：GPU 越多，Ring 延迟越高，Tree 的优势越明显</li>
+            <li><strong>拓扑结构</strong>：NVSwitch 全连接拓扑下，NVLS 算法可能优于 Ring/Tree</li>
+            <li><strong>协议选择</strong>：不同协议支持的算法组合不同（见上文表格）</li>
+        </ul>
+    </div>
+
+    <div class="deep-thought">
+        <strong>为什么不用 Halving-Doubling？</strong>
+        经典 MPI 教材里的 Recursive Halving-Doubling AllReduce 理论上延迟是 O(log N) 且带宽接近最优，
+        但它要求 "任意两个 rank 之间都能直接通信"——这在 GPU 世界不现实。
+        GPU 之间是异构互连（NVLink 带宽 >> PCIe 带宽 >> 网络带宽），
+        算法必须感知拓扑。Ring 和 Tree 的优势恰恰在于它们只需要 "邻居通信"，
+        天然适配链式/树状的物理拓扑。
+        <strong>算法的理论最优性在面对硬件约束时往往毫无意义——能贴合硬件的次优算法才是真正的最优。</strong>
+    </div>
+
+    <div id="algo-chart" class="chart-container"></div>
+</section>
+
+<!-- Section 8: Comparison -->
+<section class="content-section fade-in" id="sec8">
+    <h2 class="section-title"><span class="num">08</span>与其他技术对比——NCCL 不是孤岛</h2>
+
+    <p style="color:var(--text-secondary); margin-bottom:1.5rem;">
+        GPU 集合通信的竞技场上不只有 NCCL。理解竞品和替代方案，才能真正理解 NCCL 的设计取舍。
+    </p>
+
+    <table class="cmp-table">
+        <thead>
+            <tr>
+                <th>维度</th>
+                <th>NCCL</th>
+                <th>MPI (GPU-aware)</th>
+                <th>Gloo</th>
+                <th>RCCL</th>
+                <th>oneCCL</th>
+                <th>MSCCL/MSCCL++</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>厂商</strong></td>
+                <td>NVIDIA</td>
+                <td>开放标准</td>
+                <td>Meta</td>
+                <td>AMD</td>
+                <td>Intel</td>
+                <td>Microsoft</td>
+            </tr>
+            <tr>
+                <td><strong>执行模型</strong></td>
+                <td>GPU Kernel 驻留</td>
+                <td>CPU 发起 + GPU offload</td>
+                <td>CPU 发起</td>
+                <td>GPU Kernel 驻留</td>
+                <td>CPU Worker 编排</td>
+                <td>GPU Kernel 驻留</td>
+            </tr>
+            <tr>
+                <td><strong>通信+计算融合</strong></td>
+                <td>✅ 单 Kernel</td>
+                <td>❌ 分离</td>
+                <td>❌ CPU 侧</td>
+                <td>✅ 单 Kernel</td>
+                <td>部分</td>
+                <td>✅ 可编程融合</td>
+            </tr>
+            <tr>
+                <td><strong>硬件绑定</strong></td>
+                <td>NVIDIA GPU</td>
+                <td>通用</td>
+                <td>CPU/GPU</td>
+                <td>AMD GPU</td>
+                <td>Intel CPU/GPU</td>
+                <td>NVIDIA GPU</td>
+            </tr>
+            <tr>
+                <td><strong>算法</strong></td>
+                <td>Ring/Tree/PAT/NVLS</td>
+                <td>多种</td>
+                <td>Ring/Halving-Doubling</td>
+                <td>Ring/Tree</td>
+                <td>Ring/Recursive HD</td>
+                <td>可编程 DSL</td>
+            </tr>
+            <tr>
+                <td><strong>算法灵活性</strong></td>
+                <td>中（内置调优模型）</td>
+                <td>高</td>
+                <td>低</td>
+                <td>中</td>
+                <td>中</td>
+                <td>高（DSL 自定义）</td>
+            </tr>
+            <tr>
+                <td><strong>NVLink 利用</strong></td>
+                <td>极致优化</td>
+                <td>间接</td>
+                <td>不支持</td>
+                <td>N/A (Infinity Fabric)</td>
+                <td>N/A (Xe-Link)</td>
+                <td>良好</td>
+            </tr>
+            <tr>
+                <td><strong>小消息延迟</strong></td>
+                <td>~1μs (LL)</td>
+                <td>~10μs+</td>
+                <td>~100μs+</td>
+                <td>~1μs</td>
+                <td>取决于后端</td>
+                <td>优于 NCCL</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="grid-2" style="margin-top:1.5rem;">
+        <div class="card">
+            <h3>NCCL vs MPI：为什么不直接用 GPU-aware MPI？</h3>
+            <p>GPU-aware MPI 的问题在于 <strong>抽象层太厚</strong>。MPI 是为 CPU 设计的，GPU 数据传输被层层包裹在 MPI 的通用语义下。每次集合操作都需要多次 kernel launch 和 host-device 同步。而 NCCL 把整个通信逻辑 <strong>压缩进一个 CUDA Kernel</strong>，GPU 线程直接操作缓冲区和标志位，跳过了所有 CPU 端的调度开销。</p>
+            <p style="margin-top:0.5rem;">但 MPI 也有 NCCL 不具备的优势：标准化的 API、成熟的容错机制、跨厂商可移植性。在 HPC 领域，MPI 仍然是不可替代的。</p>
+        </div>
+        <div class="card">
+            <h3>NCCL vs MSCCL++：可编程 vs 内置</h3>
+            <p>MSCCL++ 是微软对 NCCL 的 "叛逆"——它暴露了 <code class="mono">put/signal/wait/flush</code> 等底层原语，让用户（或编译器）自己组合通信算法。这就像 eBPF 之于 Linux 内核：<strong>不是替换内核，而是让你在内核里写自定义逻辑</strong>。</p>
+            <p style="margin-top:0.5rem;">MSCCL++ 在小消息场景下比 NCCL 快 2.8x，大消息快 2.4x。但它的代价是编程复杂度——你需要自己处理拓扑、死锁、同步等问题。NCCL 则是 "交钥匙方案"。</p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>NCCL vs NVSHMEM：集合通信 vs 单边通信</h3>
+        <p>NVSHMEM 是 NVIDIA 的 GPU 端 PGAS（分区全局地址空间）实现，提供 <code class="mono">put/get</code> 这种 "单边操作"。NCCL 做的是集合通信（AllReduce/AllGather 等），NVSHMEM 做的是点对点的远程内存访问。两者是互补关系：</p>
+        <ul style="padding-left:1.5rem; margin-top:0.5rem;">
+            <li><strong>NCCL</strong> 适合 "所有人参与的规律性通信"（数据并行梯度同步）</li>
+            <li><strong>NVSHMEM</strong> 适合 "少数 GPU 之间的不规则通信"（专家并行的 All-to-All、图计算的邻居访问）</li>
+        </ul>
+    </div>
+
+    <div class="deep-thought">
+        <strong>技术生态的启示：</strong>
+        NCCL 的成功不仅仅是技术上的——它的真正护城河是 <strong>生态锁定</strong>。
+        PyTorch、TensorFlow、Horovod、DeepSpeed、Megatron-LM 全部默认使用 NCCL 作为后端。
+        这就像 Linux 内核之于容器生态——即使有技术上更优的替代品（Unikernel、微内核），
+        生态惯性让替换成本高到不可接受。
+        <strong>技术竞争的终局往往不是性能之争，而是生态之争。</strong>
+    </div>
+</section>
+
+<!-- Section 9: Key Points to Understand -->
+<section class="content-section fade-in" id="sec9">
+    <h2 class="section-title"><span class="num">09</span>理解要点——读懂 NCCL 的七把钥匙</h2>
+
+    <div class="card">
+        <h3>🔑 1. "一个 Kernel 统治一切"</h3>
+        <p>NCCL 的核心设计是把整个集合操作实现为 <strong>一个 CUDA Kernel</strong>。这个 Kernel 包含多个 Block（对应 Channel），每个 Block 在一个 SM 上运行，Block 内的 Warp 分工明确：</p>
+        <ul style="padding-left:1.5rem; margin-top:0.5rem;">
+            <li><strong>Warp 0</strong>：初始化和控制</li>
+            <li><strong>Warp 1</strong>：可能用于辅助任务</li>
+            <li><strong>剩余 Warp</strong>：执行实际的数据搬运和归约</li>
+        </ul>
+        <p style="margin-top:0.5rem;">这意味着一次集合操作只有 <strong>一次 kernel launch 开销</strong>。对比 MPI 的多次 launch + 多次同步，这个差距在高频调用场景下（比如每个 mini-batch 都要 AllReduce）是决定性的。</p>
+    </div>
+
+    <div class="card">
+        <h3>🔑 2. 拓扑感知是根基，不是优化</h3>
+        <p>NCCL 在 <code class="mono">ncclCommInitRank()</code> 时会做完整的拓扑检测：</p>
+        <div class="flow-row">
+            <div class="flow-box">读取 sysfs/nvml</div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-box">构建拓扑图</div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-box">搜索 Ring/Tree</div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-box">计算路径代价</div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-box">建立 Channel</div>
+        </div>
+        <p style="margin-top:0.75rem;">拓扑信息决定了 Ring 的顺序（哪些 GPU 相邻）、Tree 的结构（谁是父/子节点）、传输方式的选择（P2P/SHM/NET）。<strong>拓扑错了，后面的所有优化都是白费。</strong></p>
+    </div>
+
+    <div class="card">
+        <h3>🔑 3. Bootstrap 是控制面，Channel 是数据面</h3>
+        <p>NCCL 有清晰的 "控制面/数据面分离"：</p>
+        <ul style="padding-left:1.5rem;">
+            <li><strong>Bootstrap</strong>（控制面）：用普通 TCP Socket 连接所有 rank，交换初始化信息（ncclUniqueId、拓扑数据、连接参数）。类似 BGP 建立邻居关系。</li>
+            <li><strong>Channel</strong>（数据面）：实际的数据传输走 NVLink/RDMA 等高速通道。类似 MPLS 数据转发面。</li>
+        </ul>
+        <p style="margin-top:0.5rem;">Bootstrap 只在初始化时使用，运行时不参与数据通信。这种分离确保了 "慢路径不影响快路径"。</p>
+    </div>
+
+    <div class="card">
+        <h3>🔑 4. 双二叉树的精妙</h3>
+        <p>NCCL 的 Tree AllReduce 使用<strong>两棵互补的二叉树</strong>：</p>
+        <ul style="padding-left:1.5rem;">
+            <li>两棵树中，没有节点在两棵树中都是非叶节点</li>
+            <li>至多一个节点在两棵树中都是叶节点</li>
+            <li>偶数节点时第二棵树是第一棵的镜像，奇数时偏移一位</li>
+        </ul>
+        <p style="margin-top:0.5rem;">这样做的目的是 <strong>利用双向带宽</strong>——每个链路的上行和下行通道同时传输不同树的数据，带宽利用率翻倍。</p>
+    </div>
+
+    <div class="card">
+        <h3>🔑 5. Proxy Thread 是必要之恶</h3>
+        <p>跨节点通信需要 CPU 端的 Proxy Thread 来提交 RDMA 操作。这是因为 InfiniBand Verbs API 是面向 CPU 的——GPU 不能直接操作 QP。Proxy Thread 做的事情本质上就是：</p>
+        <ol style="padding-left:1.5rem;">
+            <li>轮询 GPU 缓冲区的 head/tail 指针，检测数据就绪</li>
+            <li>调用 <code class="mono">ibv_post_send()</code> 发起 RDMA Write</li>
+            <li>轮询 CQ（完成队列），确认传输完成</li>
+            <li>更新 head/tail 指针，通知 GPU 可以继续</li>
+        </ol>
+        <p style="margin-top:0.5rem;">NVIDIA 正在通过 IBGDA（IB GPU-Direct Async）技术试图消除 Proxy Thread，让 GPU 直接提交网络操作。这是 NCCL 2.28+ 的重点方向。</p>
+    </div>
+
+    <div class="card">
+        <h3>🔑 6. 环境变量是调优的钥匙</h3>
+        <p>NCCL 提供了大量环境变量来控制行为：</p>
+        <table class="cmp-table">
+            <thead><tr><th>变量</th><th>作用</th><th>典型值</th></tr></thead>
+            <tbody>
+                <tr><td class="mono">NCCL_ALGO</td><td>强制使用特定算法</td><td>Ring / Tree / CollNet</td></tr>
+                <tr><td class="mono">NCCL_PROTO</td><td>强制使用特定协议</td><td>Simple / LL / LL128</td></tr>
+                <tr><td class="mono">NCCL_P2P_DISABLE</td><td>禁用 P2P 传输</td><td>0 / 1</td></tr>
+                <tr><td class="mono">NCCL_SHM_DISABLE</td><td>禁用共享内存传输</td><td>0 / 1</td></tr>
+                <tr><td class="mono">NCCL_NET_GDR_LEVEL</td><td>GDRDMA 启用阈值</td><td>0~5</td></tr>
+                <tr><td class="mono">NCCL_DEBUG</td><td>调试日志级别</td><td>INFO / WARN / TRACE</td></tr>
+                <tr><td class="mono">NCCL_CROSS_NIC</td><td>允许跨 NIC 通信</td><td>0 / 1 / 2</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <h3>🔑 7. NCCL 的数据 "元素" 定义因操作而异</h3>
+        <p>这是一个容易忽略但很重要的细节：</p>
+        <ul style="padding-left:1.5rem;">
+            <li><strong>AllGather / Broadcast</strong>：元素 = 1 字节（按字节搬运）</li>
+            <li><strong>AllReduce / Reduce / ReduceScatter</strong>：元素 = 用户数据类型大小（按类型归约）</li>
+        </ul>
+        <p style="margin-top:0.5rem;">前者是纯数据搬运，不需要知道数据类型；后者需要做算术运算，必须以正确的类型粒度处理。</p>
+    </div>
+</section>
+
+<!-- Section 10: Pitfalls -->
+<section class="content-section fade-in" id="sec10">
+    <h2 class="section-title"><span class="num">10</span>注意要点——踩坑指南</h2>
+
+    <div class="warning">
+        <div class="label">⚠️ 坑 1：Channel 数量不是越多越好</div>
+        <p>
+            Channel 数量增加意味着每个 Channel 分到的数据变少。当每个 Channel 的 chunk 小于 NIC 的 512KiB FIFO 缓冲时，
+            NIC 发送的是 "半满缓冲"，导致 PCIe 和网络吞吐下降。NCCL 内部会针对小消息自动减少 Channel 数，
+            但如果你通过环境变量强制设置了过多的 Channel，可能反而降低性能。
+        </p>
+    </div>
+
+    <div class="warning">
+        <div class="label">⚠️ 坑 2：LL128 不是万能的</div>
+        <p>
+            LL128 依赖 128 字节原子写的硬件保证。在 PCIe 系统上（没有 NVLink），这个保证不存在——
+            PCIe 可能把 128 字节写拆成多个小写操作，导致接收方看到 "半成品数据"。
+            NCCL 会自动检测并禁用 LL128，但如果你强制设置 <code class="mono">NCCL_PROTO=LL128</code>，在 PCIe 系统上可能导致 <strong>数据损坏</strong>。
+        </p>
+    </div>
+
+    <div class="warning">
+        <div class="label">⚠️ 坑 3：GDRDMA 需要 GPU 和 NIC 在同一 PCIe switch</div>
+        <p>
+            GPUDirect RDMA 要求 NIC 能直接访问 GPU 显存。如果 GPU 和 NIC 不在同一个 PCIe switch 下，
+            RDMA 操作要穿越 CPU Root Complex，性能急剧下降甚至不可用。
+            <code class="mono">nvidia-smi topo -m</code> 可以查看 GPU 和 NIC 的亲缘关系。
+        </p>
+    </div>
+
+    <div class="warning">
+        <div class="label">⚠️ 坑 4：ncclCommInitRank 是集体操作</div>
+        <p>
+            <code class="mono">ncclCommInitRank()</code> 是一个 <strong>集体操作</strong>——所有 rank 必须同时调用，否则会死锁。
+            这和 MPI_Comm_create 一样。常见错误是部分进程因异常退出导致其他进程永久阻塞在初始化。
+            生产环境中务必设置超时机制。
+        </p>
+    </div>
+
+    <div class="warning">
+        <div class="label">⚠️ 坑 5：手动设置 NCCL_NTHREADS 可能导致错误</div>
+        <p>
+            在新版本 NCCL 中，手动设置 <code class="mono">NCCL_NTHREADS</code> 等线程参数可能被忽略，
+            甚至导致不正确的行为。NCCL 的调优模型已经能自动选择最优配置。
+            <strong>除非你非常清楚自己在做什么，否则不要手动覆盖 NCCL 的内部参数。</strong>
+        </p>
+    </div>
+
+    <div class="warning">
+        <div class="label">⚠️ 坑 6：CUDA Graph 中的 NCCL 有额外约束</div>
+        <p>
+            在 CUDA Graph 中使用 NCCL 时，通信器的拓扑和连接在 graph capture 时确定，replay 时不能改变。
+            如果 GPU 频率动态调整或网络路径变化，可能导致 graph replay 失败或性能异常。
+        </p>
+    </div>
+
+    <div class="card" style="margin-top:1.5rem;">
+        <h3>🔍 调试技巧</h3>
+        <div class="code-block">
+<span class="comment"># 开启详细日志</span>
+<span class="keyword">export</span> NCCL_DEBUG=INFO
+<span class="keyword">export</span> NCCL_DEBUG_SUBSYS=ALL
+
+<span class="comment"># 查看拓扑信息</span>
+nvidia-smi topo -m
+
+<span class="comment"># 查看 NCCL 使用的算法和协议</span>
+<span class="keyword">export</span> NCCL_DEBUG=INFO
+<span class="comment"># 日志中搜索 "algorithm" 和 "protocol"</span>
+
+<span class="comment"># 性能测试</span>
+<span class="comment"># 使用 nccl-tests 验证带宽和延迟</span>
+./build/all_reduce_perf -b 8 -e 128M -f 2 -g 8
+        </div>
+    </div>
+</section>
+
+<!-- Section 11: Conclusion -->
+<section class="content-section fade-in" id="sec11">
+    <h2 class="section-title"><span class="num">11</span>结语——通信系统的永恒命题</h2>
+
+    <div class="card">
+        <p style="font-size:1.05rem; line-height:2;">
+            回顾整个 NCCL 的架构，你会发现它在回答一组 <strong>永恒的通信系统命题</strong>：
+        </p>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1rem;">
+            <div style="background:rgba(34,197,94,0.05); border-radius:8px; padding:1rem;">
+                <strong style="color:var(--accent-green);">命题 1：带宽 vs 延迟</strong>
+                <p style="font-size:0.9rem; color:var(--text-secondary);">Ring 优化带宽，Tree 优化延迟。NCCL 的回答是：两个都要，运行时切换。</p>
+            </div>
+            <div style="background:rgba(59,130,246,0.05); border-radius:8px; padding:1rem;">
+                <strong style="color:var(--accent-blue);">命题 2：通用 vs 专用</strong>
+                <p style="font-size:0.9rem; color:var(--text-secondary);">MPI 通用但慢，NCCL 专用但快。NCCL 的回答是：为 90% 的深度学习场景做极致优化。</p>
+            </div>
+            <div style="background:rgba(245,158,11,0.05); border-radius:8px; padding:1rem;">
+                <strong style="color:var(--accent-amber);">命题 3：硬件感知 vs 硬件抽象</strong>
+                <p style="font-size:0.9rem; color:var(--text-secondary);">NCCL 深度绑定 NVIDIA 硬件（NVLink、NVSwitch、GDRDMA），性能最优但可移植性最差。</p>
+            </div>
+            <div style="background:rgba(168,85,247,0.05); border-radius:8px; padding:1rem;">
+                <strong style="color:var(--accent-purple);">命题 4：同步粒度</strong>
+                <p style="font-size:0.9rem; color:var(--text-secondary);">Memory Fence → Flag → 无同步。NCCL 的三种协议恰好覆盖了从粗到细的同步频谱。</p>
+            </div>
+        </div>
+
+        <p style="margin-top:1.5rem; font-size:1.05rem;">
+            这些命题不仅存在于 GPU 通信中——TCP/IP 协议栈、Linux 内核、数据库系统都在反复解答同样的问题。
+            NCCL 的价值不仅在于它解决了 GPU 通信的工程问题，更在于它展示了 <strong>如何在特定约束下做出合理的工程取舍</strong>。
+        </p>
+
+        <div class="deep-thought" style="margin:1.5rem 0 0 0;">
+            <strong>最后的反思：</strong>NCCL 走到今天，从一个简单的 Ring AllReduce 库，
+            演化成了一个支持多种算法、多种协议、多种传输的完整通信栈。
+            它的成功证明了一个道理：<strong>与其一开始就设计一个完美的通用框架，
+            不如先把一个具体问题解决到极致，然后沿着真实需求的方向逐步扩展。</strong>
+            这不是 "迭代开发" 的方法论口号，这是被 NCCL 十年演化历程验证过的工程智慧。
+        </div>
+    </div>
+</section>
+
+<!-- Footer -->
+<footer style="text-align:center; padding:3rem 2rem; color:var(--text-secondary); font-size:0.85rem; border-top:1px solid var(--border-subtle);">
+    <p>NCCL 深度架构分析 | 基于 NCCL 2.19+ 源码与 Demystifying NCCL 论文</p>
+    <p style="margin-top:0.5rem;">数据参考：NVIDIA 官方文档 · arXiv:2507.04786 · NCCL GitHub Repository</p>
+</footer>
+
+<script>
+// ============ Scroll Animation ============
+const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+        if (entry.isIntersecting) {
+            entry.target.classList.add('visible');
+        }
+    });
+}, { threshold: 0.1 });
+
+document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+
+// ============ ECharts ============
+// Timeline Chart
+const timelineChart = echarts.init(document.getElementById('timeline-chart'));
+timelineChart.setOption({
+    backgroundColor: 'transparent',
+    title: {
+        text: 'NCCL 功能演进时间线',
+        textStyle: { color: '#e2e8f0', fontSize: 16, fontWeight: 700 },
+        left: 'center'
+    },
+    tooltip: {
+        trigger: 'item',
+        backgroundColor: '#1e293b',
+        borderColor: '#22c55e',
+        textStyle: { color: '#e2e8f0' }
+    },
+    xAxis: {
+        type: 'category',
+        data: ['2015\nv1.0', '2017\nv2.0', '2019\nv2.4', '2020\nv2.7', '2022\nv2.12', '2024\nv2.23', '2025\nv2.28'],
+        axisLabel: { color: '#94a3b8', fontSize: 11 },
+        axisLine: { lineStyle: { color: '#1e293b' } }
+    },
+    yAxis: {
+        type: 'value',
+        name: '功能复杂度',
+        nameTextStyle: { color: '#94a3b8' },
+        axisLabel: { color: '#94a3b8' },
+        splitLine: { lineStyle: { color: '#1e293b' } }
+    },
+    series: [{
+        type: 'line',
+        data: [10, 35, 55, 65, 78, 90, 100],
+        smooth: true,
+        lineStyle: { color: '#22c55e', width: 3 },
+        areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                { offset: 0, color: 'rgba(34,197,94,0.3)' },
+                { offset: 1, color: 'rgba(34,197,94,0.01)' }
+            ])
+        },
+        itemStyle: { color: '#22c55e' },
+        symbolSize: 10,
+        label: {
+            show: true,
+            formatter: function(params) {
+                var labels = ['Ring Only', 'Multi-node\nRDMA', 'Tree\nLL128', 'CollNet\nNVLS', 'CUDA\nGraph', 'PAT\n算法', 'Device\nAPI'];
+                return labels[params.dataIndex];
+            },
+            color: '#e2e8f0',
+            fontSize: 10,
+            position: 'top'
+        }
+    }]
+});
+
+// Pipeline Chart
+const pipelineChart = echarts.init(document.getElementById('pipeline-chart'));
+pipelineChart.setOption({
+    backgroundColor: 'transparent',
+    title: {
+        text: 'Channel 并行 vs 流水线深度的吞吐模型',
+        textStyle: { color: '#e2e8f0', fontSize: 16, fontWeight: 700 },
+        left: 'center'
+    },
+    tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#1e293b',
+        borderColor: '#22c55e',
+        textStyle: { color: '#e2e8f0' }
+    },
+    legend: {
+        data: ['2 Channels', '4 Channels', '8 Channels', '16 Channels'],
+        textStyle: { color: '#94a3b8' },
+        bottom: 10
+    },
+    xAxis: {
+        type: 'category',
+        name: '消息大小',
+        nameTextStyle: { color: '#94a3b8' },
+        data: ['1KB', '4KB', '16KB', '64KB', '256KB', '1MB', '4MB', '16MB', '64MB', '256MB'],
+        axisLabel: { color: '#94a3b8', fontSize: 10 },
+        axisLine: { lineStyle: { color: '#1e293b' } }
+    },
+    yAxis: {
+        type: 'value',
+        name: '相对吞吐 (归一化)',
+        nameTextStyle: { color: '#94a3b8' },
+        axisLabel: { color: '#94a3b8' },
+        splitLine: { lineStyle: { color: '#1e293b' } }
+    },
+    series: [
+        {
+            name: '2 Channels', type: 'line', smooth: true,
+            data: [0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.88, 0.9, 0.92, 0.93],
+            lineStyle: { color: '#3b82f6' }, itemStyle: { color: '#3b82f6' }
+        },
+        {
+            name: '4 Channels', type: 'line', smooth: true,
+            data: [0.5, 0.6, 0.72, 0.82, 0.9, 0.95, 0.97, 0.98, 0.98, 0.98],
+            lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' }
+        },
+        {
+            name: '8 Channels', type: 'line', smooth: true,
+            data: [0.3, 0.45, 0.65, 0.82, 0.93, 0.98, 1.0, 1.0, 0.99, 0.99],
+            lineStyle: { color: '#f59e0b' }, itemStyle: { color: '#f59e0b' }
+        },
+        {
+            name: '16 Channels', type: 'line', smooth: true,
+            data: [0.15, 0.28, 0.48, 0.7, 0.88, 0.95, 0.99, 1.0, 1.0, 0.98],
+            lineStyle: { color: '#a855f7' }, itemStyle: { color: '#a855f7' }
+        }
+    ]
+});
+
+// Protocol Chart
+const protocolChart = echarts.init(document.getElementById('protocol-chart'));
+
+// ====== 以下代码紧接上文 protocolChart.setOption 的 tooltip.border 处 ======
+
+// 将上文截断处的 protocolChart.setOption 完整重写如下：
+// （请将上文中不完整的 protocolChart.setOption({...}) 整段替换为以下内容）
+
+protocolChart.setOption({
+    backgroundColor: 'transparent',
+    title: {
+        text: '三种协议的带宽与延迟特性',
+        textStyle: { color: '#e2e8f0', fontSize: 16, fontWeight: 700 },
+        left: 'center'
+    },
+    tooltip: {
+        trigger: 'item',
+        backgroundColor: '#1e293b',
+        borderColor: '#22c55e',
+        textStyle: { color: '#e2e8f0' }
+    },
+    legend: {
+        data: ['Simple', 'LL', 'LL128'],
+        textStyle: { color: '#94a3b8' },
+        bottom: 10
+    },
+    radar: {
+        indicator: [
+            { name: '大消息带宽', max: 100 },
+            { name: '小消息延迟\n(越高越好)', max: 100 },
+            { name: '带宽利用率', max: 100 },
+            { name: '硬件兼容性', max: 100 },
+            { name: '同步开销\n(越高=越低开销)', max: 100 }
+        ],
+        shape: 'polygon',
+        splitNumber: 4,
+        axisName: { color: '#94a3b8', fontSize: 11 },
+        splitLine: { lineStyle: { color: '#1e293b' } },
+        splitArea: { areaStyle: { color: ['rgba(34,197,94,0.02)', 'rgba(34,197,94,0.05)'] } },
+        axisLine: { lineStyle: { color: '#1e293b' } }
+    },
+    series: [{
+        type: 'radar',
+        data: [
+            {
+                value: [95, 30, 98, 90, 40],
+                name: 'Simple',
+                lineStyle: { color: '#22c55e', width: 2 },
+                areaStyle: { color: 'rgba(34,197,94,0.15)' },
+                itemStyle: { color: '#22c55e' }
+            },
+            {
+                value: [35, 95, 50, 70, 90],
+                name: 'LL',
+                lineStyle: { color: '#3b82f6', width: 2 },
+                areaStyle: { color: 'rgba(59,130,246,0.15)' },
+                itemStyle: { color: '#3b82f6' }
+            },
+            {
+                value: [85, 80, 93, 40, 85],
+                name: 'LL128',
+                lineStyle: { color: '#f59e0b', width: 2 },
+                areaStyle: { color: 'rgba(245,158,11,0.15)' },
+                itemStyle: { color: '#f59e0b' }
+            }
+        ]
+    }]
+});
+
+// Algorithm Comparison Chart
+const algoChart = echarts.init(document.getElementById('algo-chart'));
+algoChart.setOption({
+    backgroundColor: 'transparent',
+    title: {
+        text: 'Ring vs Tree: 延迟与带宽随 GPU 数量的变化',
+        textStyle: { color: '#e2e8f0', fontSize: 16, fontWeight: 700 },
+        left: 'center'
+    },
+    tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#1e293b',
+        borderColor: '#22c55e',
+        textStyle: { color: '#e2e8f0' }
+    },
+    legend: {
+        data: ['Ring 延迟', 'Tree 延迟', 'Ring 带宽利用率', 'Tree 带宽利用率'],
+        textStyle: { color: '#94a3b8' },
+        bottom: 10
+    },
+    xAxis: {
+        type: 'category',
+        name: 'GPU 数量',
+        nameTextStyle: { color: '#94a3b8' },
+        data: ['2', '4', '8', '16', '32', '64', '128', '256', '512', '1024'],
+        axisLabel: { color: '#94a3b8' },
+        axisLine: { lineStyle: { color: '#1e293b' } }
+    },
+    yAxis: [
+        {
+            type: 'value',
+            name: '相对延迟 (归一化)',
+            nameTextStyle: { color: '#94a3b8' },
+            axisLabel: { color: '#94a3b8' },
+            splitLine: { lineStyle: { color: '#1e293b' } },
+            position: 'left'
+        },
+        {
+            type: 'value',
+            name: '带宽利用率 (%)',
+            nameTextStyle: { color: '#94a3b8' },
+            axisLabel: { color: '#94a3b8' },
+            splitLine: { show: false },
+            position: 'right',
+            max: 100
+        }
+    ],
+    series: [
+        {
+            name: 'Ring 延迟',
+            type: 'line',
+            yAxisIndex: 0,
+            data: [2, 6, 14, 30, 62, 126, 254, 510, 1022, 2046],
+            smooth: true,
+            lineStyle: { color: '#ef4444', width: 2, type: 'solid' },
+            itemStyle: { color: '#ef4444' }
+        },
+        {
+            name: 'Tree 延迟',
+            type: 'line',
+            yAxisIndex: 0,
+            data: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+            smooth: true,
+            lineStyle: { color: '#22c55e', width: 2, type: 'solid' },
+            itemStyle: { color: '#22c55e' }
+        },
+        {
+            name: 'Ring 带宽利用率',
+            type: 'bar',
+            yAxisIndex: 1,
+            data: [50, 75, 87, 93, 97, 98, 99, 99, 99, 99],
+            barWidth: '20%',
+            itemStyle: {
+                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                    { offset: 0, color: 'rgba(59,130,246,0.8)' },
+                    { offset: 1, color: 'rgba(59,130,246,0.2)' }
+                ])
+            }
+        },
+        {
+            name: 'Tree 带宽利用率',
+            type: 'bar',
+            yAxisIndex: 1,
+            data: [50, 50, 50, 50, 50, 50, 50, 50, 50, 50],
+            barWidth: '20%',
+            itemStyle: {
+                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                    { offset: 0, color: 'rgba(245,158,11,0.8)' },
+                    { offset: 1, color: 'rgba(245,158,11,0.2)' }
+                ])
+            }
+        }
+    ]
+});
+
+// ============ Responsive Resize ============
+window.addEventListener('resize', function() {
+    timelineChart.resize();
+    pipelineChart.resize();
+    protocolChart.resize();
+    algoChart.resize();
+});
+</script>
+
+</body>
+</html>

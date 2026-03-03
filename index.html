@@ -1,0 +1,1221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NCCL 架构动画展示</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            padding: 20px 30px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e0e0e0;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        button {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: all 0.3s ease;
+        }
+
+        button:hover {
+            background: #764ba2;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        button.active {
+            background: #ff6b6b;
+        }
+
+        .tab-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .tab-btn {
+            padding: 8px 16px;
+            background: #e0e0e0;
+            color: #333;
+            border: 2px solid transparent;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .tab-btn.active {
+            background: #667eea;
+            color: white;
+            border-color: #764ba2;
+        }
+
+        .main-content {
+            padding: 30px;
+            display: flex;
+            gap: 30px;
+        }
+
+        .visualization-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        canvas {
+            border: 2px solid #ddd;
+            border-radius: 10px;
+            background: #fafafa;
+            display: block;
+            width: 100%;
+            max-width: 100%;
+        }
+
+        .info-panel {
+            width: 300px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            border-left: 5px solid #667eea;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .info-panel h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
+
+        .info-item {
+            margin-bottom: 15px;
+            padding: 10px;
+            background: white;
+            border-radius: 5px;
+            border-left: 3px solid #764ba2;
+        }
+
+        .info-item label {
+            font-weight: bold;
+            color: #333;
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        .info-item value {
+            color: #667eea;
+            font-family: 'Courier New', monospace;
+        }
+
+        .legend {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9em;
+        }
+
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 3px;
+            border: 1px solid #ddd;
+        }
+
+        .architecture-tabs {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 20px;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .code-block {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85em;
+            overflow-x: auto;
+            margin-top: 10px;
+            line-height: 1.4;
+        }
+
+        .keyword {
+            color: #ff79c6;
+        }
+
+        .function {
+            color: #8be9fd;
+        }
+
+        .string {
+            color: #f1fa8c;
+        }
+
+        .comment {
+            color: #6272a4;
+        }
+
+        .responsive-info {
+            display: none;
+        }
+
+        @media (max-width: 1024px) {
+            .main-content {
+                flex-direction: column;
+            }
+
+            .info-panel {
+                width: 100%;
+                max-height: none;
+            }
+
+            .responsive-info {
+                display: block;
+            }
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            border-top: 3px solid #667eea;
+            text-align: center;
+        }
+
+        .stat-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .speed-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        input[type="range"] {
+            width: 150px;
+            cursor: pointer;
+        }
+
+        .footer {
+            background: #f8f9fa;
+            padding: 20px;
+            border-top: 1px solid #e0e0e0;
+            text-align: center;
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        /* 动画定义 */
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        @keyframes moveRight {
+            0% {
+                transform: translateX(0);
+            }
+            100% {
+                transform: translateX(100px);
+            }
+        }
+
+        @keyframes moveDown {
+            0% {
+                transform: translateY(0);
+            }
+            100% {
+                transform: translateY(100px);
+            }
+        }
+
+        .message {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #667eea;
+            color: white;
+            padding: 15px 25px;
+            border-radius: 5px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+            animation: slideIn 0.3s ease;
+            z-index: 1000;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 NCCL 架构可视化</h1>
+            <p>NVIDIA 集合通信库 - 实时动画展示</p>
+        </header>
+
+        <div class="controls">
+            <div class="tab-buttons">
+                <button class="tab-btn active" data-tab="architecture">架构层次</button>
+                <button class="tab-btn" data-tab="allreduce">AllReduce</button>
+                <button class="tab-btn" data-tab="topology">GPU拓扑</button>
+                <button class="tab-btn" data-tab="collective">集合操作</button>
+            </div>
+
+            <button id="startBtn" onclick="startAnimation()">▶ 开始动画</button>
+            <button id="pauseBtn" onclick="pauseAnimation()" class="active" style="display:none;">⏸ 暂停</button>
+            <button onclick="resetAnimation()">↻ 重置</button>
+
+            <div class="speed-control">
+                <label for="speedSlider">动画速度:</label>
+                <input type="range" id="speedSlider" min="0.5" max="2" step="0.1" value="1" onchange="changeSpeed(this.value)">
+                <span id="speedValue">1.0x</span>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="visualization-area">
+                <!-- 架构层次 Tab -->
+                <div id="architecture" class="tab-content active">
+                    <h2>NCCL 架构层次</h2>
+                    <canvas id="architectureCanvas" width="900" height="500"></canvas>
+                    <div class="code-block">
+<span class="comment">// NCCL 初始化流程</span>
+<span class="keyword">ncclComm_t</span> <span class="function">comm</span>;
+<span class="function">ncclCommInitAll</span>(&<span class="function">comm</span>, <span class="string">8</span>, <span class="keyword">NULL</span>);
+
+<span class="comment">// 执行集合操作</span>
+<span class="function">ncclAllReduce</span>(<span class="function">data</span>, <span class="function">data</span>, 
+              <span class="string">1024</span>, <span class="keyword">ncclFloat</span>, 
+              <span class="keyword">ncclSum</span>, <span class="function">comm</span>, <span class="string">0</span>);
+                    </div>
+                </div>
+
+                <!-- AllReduce Tab -->
+                <div id="allreduce" class="tab-content">
+                    <h2>环形 AllReduce 算法</h2>
+                    <canvas id="allreduceCanvas" width="900" height="500"></canvas>
+                    <div class="code-block">
+<span class="comment">// 环形AllReduce - Reduce-Scatter 阶段</span>
+<span class="keyword">for</span> (<span class="keyword">int</span> <span class="function">step</span> = <span class="string">0</span>; <span class="function">step</span> < <span class="function">nRanks</span> - <span class="string">1</span>; <span class="function">step</span>++) {
+    <span class="function">SendRecv</span>(<span class="function">prevRank</span>, <span class="function">buffer</span>, 
+             <span class="function">nextRank</span>, <span class="function">recvBuffer</span>);
+    <span class="function">ReduceKernel</span>(&lt;&lt;&lt;...&gt;&gt;&gt;();
+}
+                    </div>
+                </div>
+
+                <!-- GPU拓扑 Tab -->
+                <div id="topology" class="tab-content">
+                    <h2>GPU 互连拓扑</h2>
+                    <canvas id="topologyCanvas" width="900" height="500"></canvas>
+                    <div class="code-block">
+<span class="comment">// 拓扑感知路由</span>
+<span class="keyword">if</span> (<span class="function">hasNVLink</span>(<span class="function">gpu1</span>, <span class="function">gpu2</span>)) {
+    <span class="string">// 300GB/s 双向</span>
+    <span class="function">useNVLink</span>();
+} <span class="keyword">else if</span> (<span class="function">canP2P</span>(<span class="function">gpu1</span>, <span class="function">gpu2</span>)) {
+    <span class="string">// 16GB/s PCIe</span>
+    <span class="function">useP2P</span>();
+}
+                    </div>
+                </div>
+
+                <!-- 集合操作 Tab -->
+                <div id="collective" class="tab-content">
+                    <h2>NCCL 集合通信原语</h2>
+                    <canvas id="collectiveCanvas" width="900" height="500"></canvas>
+                    <div class="code-block">
+<span class="comment">// 支持的集合操作</span>
+<span class="function">ncclAllReduce</span>   <span class="string">// 求和+广播</span>
+<span class="function">ncclAllGather</span>   <span class="string">// 收集所有数据</span>
+<span class="function">ncclReduceScatter</span> <span class="string">// 聚合后分散</span>
+<span class="function">ncclBroadcast</span>   <span class="string">// 单播到所有</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 信息面板 -->
+            <div class="info-panel">
+                <h3>📊 实时信息</h3>
+                
+                <div class="info-item">
+                    <label>当前标签页:</label>
+                    <value id="currentTab">架构层次</value>
+                </div>
+
+                <div class="info-item">
+                    <label>动画状态:</label>
+                    <value id="animationStatus">已停止</value>
+                </div>
+
+                <div class="info-item">
+                    <label>GPU数量:</label>
+                    <value id="gpuCount">8</value>
+                </div>
+
+                <div class="info-item">
+                    <label>当前步骤:</label>
+                    <value id="currentStep">0</value>
+                </div>
+
+                <div class="info-item">
+                    <label>通讯器状态:</label>
+                    <value id="commStatus">未初始化</value>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-label">NVLink 带宽</div>
+                        <div class="stat-value">300 GB/s</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">PCIe 带宽</div>
+                        <div class="stat-value">16 GB/s</div>
+                    </div>
+                </div>
+
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #667eea;"></div>
+                        <span>GPU 活跃</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #51cf66;"></div>
+                        <span>数据传输</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #ff922b;"></div>
+                        <span>计算操作</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #e0e0e0;"></div>
+                        <span>空闲</span>
+                    </div>
+                </div>
+
+                <div class="info-item" style="margin-top: 20px; background: #e7f5ff; border-left: 3px solid #0066cc;">
+                    <label style="color: #0066cc;">💡 提示:</label>
+                    <value style="color: #0066cc;">点击不同的标签页查看各种NCCL操作的动画演示</value>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>✨ NCCL (NVIDIA Collective Communications Library) 架构可视化演示</p>
+            <p style="margin-top: 10px; font-size: 0.85em;">
+                参考文档: <a href="https://github.com/NVIDIA/nccl" style="color: #667eea; text-decoration: none;">NVIDIA NCCL GitHub</a> | 
+                <a href="https://docs.nvidia.com/deeplearning/nccl/" style="color: #667eea; text-decoration: none;">官方文档</a>
+            </p>
+        </div>
+    </div>
+
+    <script>
+        // ==================== 全局变量 ====================
+        let animationRunning = false;
+        let animationSpeed = 1;
+        let currentTab = 'architecture';
+        let frameCount = 0;
+
+        // ==================== Canvas 绘制工具函数 ====================
+        class CanvasHelper {
+            static drawRect(ctx, x, y, width, height, color, options = {}) {
+                ctx.fillStyle = color;
+                ctx.fillRect(x, y, width, height);
+                if (options.stroke) {
+                    ctx.strokeStyle = options.stroke;
+                    ctx.lineWidth = options.lineWidth || 2;
+                    ctx.strokeRect(x, y, width, height);
+                }
+                if (options.borderRadius) {
+                    // 简化实现，不绘制圆角
+                }
+            }
+
+            static drawCircle(ctx, x, y, radius, color, options = {}) {
+                ctx.beginPath();
+                ctx.arc(x, y, radius, 0, Math.PI * 2);
+                ctx.fillStyle = color;
+                ctx.fill();
+                if (options.stroke) {
+                    ctx.strokeStyle = options.stroke;
+                    ctx.lineWidth = options.lineWidth || 2;
+                    ctx.stroke();
+                }
+            }
+
+            static drawText(ctx, text, x, y, options = {}) {
+                ctx.font = options.font || '14px Arial';
+                ctx.fillStyle = options.color || '#000';
+                ctx.textAlign = options.align || 'left';
+                ctx.textBaseline = options.baseline || 'top';
+                ctx.fillText(text, x, y);
+            }
+
+            static drawArrow(ctx, fromX, fromY, toX, toY, color, options = {}) {
+                const headlen = options.headlen || 15;
+                const angle = Math.atan2(toY - fromY, toX - fromX);
+
+                ctx.strokeStyle = color;
+                ctx.fillStyle = color;
+                ctx.lineWidth = options.lineWidth || 2;
+
+                // 主线
+                ctx.beginPath();
+                ctx.moveTo(fromX, fromY);
+                ctx.lineTo(toX, toY);
+                ctx.stroke();
+
+                // 箭头
+                ctx.beginPath();
+                ctx.moveTo(toX, toY);
+                ctx.lineTo(toX - headlen * Math.cos(angle - Math.PI / 6), toY - headlen * Math.sin(angle - Math.PI / 6));
+                ctx.lineTo(toX - headlen * Math.cos(angle + Math.PI / 6), toY - headlen * Math.sin(angle + Math.PI / 6));
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            static drawDashedLine(ctx, fromX, fromY, toX, toY, color, options = {}) {
+                ctx.strokeStyle = color;
+                ctx.lineWidth = options.lineWidth || 2;
+                ctx.setLineDash(options.dash || [5, 5]);
+                ctx.beginPath();
+                ctx.moveTo(fromX, fromY);
+                ctx.lineTo(toX, toY);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+        }
+
+        // ==================== 架构层次动画 ====================
+        function drawArchitectureLayer() {
+            const canvas = document.getElementById('architectureCanvas');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const layers = [
+                { name: '应用层 (App Layer)', y: 50, color: '#667eea' },
+                { name: '集合通信层 (Collectives)', y: 130, color: '#764ba2' },
+                { name: '通道层 (Channel Layer)', y: 210, color: '#51cf66' },
+                { name: '传输层 (Transport)', y: 290, color: '#ff922b' },
+                { name: 'CUDA驱动 (CUDA Driver)', y: 370, color: '#ff6b6b' }
+            ];
+
+            // 背景渐变
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#f8f9fa');
+            gradient.addColorStop(1, '#e9ecef');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 绘制每一层
+            layers.forEach((layer, index) => {
+                const pulse = Math.abs(Math.sin(frameCount * 0.05 + index * 0.5)) * 5;
+
+                // 层框
+                CanvasHelper.drawRect(ctx, 50 + pulse, layer.y, 800 - pulse * 2, 60, layer.color, {
+                    stroke: '#333',
+                    lineWidth: 2
+                });
+
+                // 层名称
+                CanvasHelper.drawText(ctx, layer.name, 70, layer.y + 20, {
+                    font: 'bold 16px Arial',
+                    color: 'white',
+                    align: 'left'
+                });
+
+                // 添加子组件信息
+                let subInfo = '';
+                switch (index) {
+                    case 0:
+                        subInfo = 'PyTorch / TensorFlow / Custom Apps';
+                        break;
+                    case 1:
+                        subInfo = 'AllReduce | AllGather | ReduceScatter | Broadcast';
+                        break;
+                    case 2:
+                        subInfo = '多通道并行 (支持8+通道)';
+                        break;
+                    case 3:
+                        subInfo = 'P2P | Network | SharedMemory';
+                        break;
+                    case 4:
+                        subInfo = 'NVLink | PCIe | Ethernet';
+                        break;
+                }
+
+                CanvasHelper.drawText(ctx, subInfo, 70, layer.y + 38, {
+                    font: 'italic 12px Arial',
+                    color: 'rgba(255,255,255,0.8)'
+                });
+
+                // 箭头连接
+                if (index < layers.length - 1) {
+                    CanvasHelper.drawArrow(ctx, 450, layer.y + 60, 450, layers[index + 1].y, '#999', {
+                        lineWidth: 2
+                    });
+                }
+            });
+
+            // 标题
+            CanvasHelper.drawText(ctx, 'NCCL 系统架构 - 分层设计', 50, 20, {
+                font: 'bold 18px Arial',
+                color: '#333'
+            });
+
+            // 性能指标
+            const metrics = [
+                { label: '单卡GPU内存', value: '80GB', x: 100 },
+                { label: '集群规模', value: '128+', x: 320 },
+                { label: '通信延迟', value: '<1μs', x: 540 },
+                { label: '带宽利用', value: '~95%', x: 760 }
+            ];
+
+            metrics.forEach((metric, i) => {
+                CanvasHelper.drawRect(ctx, metric.x, 450, 180, 35, '#f0f0f0', {
+                    stroke: '#667eea',
+                    lineWidth: 1
+                });
+                CanvasHelper.drawText(ctx, metric.label, metric.x + 10, 456, {
+                    font: 'bold 11px Arial',
+                    color: '#667eea'
+                });
+                CanvasHelper.drawText(ctx, metric.value, metric.x + 90, 456, {
+                    font: 'bold 14px Arial',
+                    color: '#764ba2'
+                });
+            });
+        }
+
+        // ==================== AllReduce 环形算法动画 ====================
+        function drawAllReduceAnimation() {
+            const canvas = document.getElementById('allreduceCanvas');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 背景
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#f8f9fa');
+            gradient.addColorStop(1, '#e9ecef');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2 - 40;
+            const radius = 100;
+            const numGPU = 8;
+
+            // 绘制GPU节点
+            const step = Math.floor((frameCount / 2) % numGPU);
+
+            for (let i = 0; i < numGPU; i++) {
+                const angle = (i * 2 * Math.PI) / numGPU - Math.PI / 2;
+                const x = centerX + radius * Math.cos(angle);
+                const y = centerY + radius * Math.sin(angle);
+
+                // 确定GPU的颜色
+                let color = '#e0e0e0';
+                if (animationRunning) {
+                    if (i === step) {
+                        color = '#ff922b'; // 当前活跃
+                    } else if ((i - 1 + numGPU) % numGPU === step) {
+                        color = '#51cf66'; // 接收数据
+                    } else if ((i + 1) % numGPU === step) {
+                        color = '#667eea'; // 发送数据
+                    }
+                }
+
+                const size = i === step ? 35 : 30;
+                CanvasHelper.drawCircle(ctx, x, y, size, color, {
+                    stroke: '#333',
+                    lineWidth: 2
+                });
+
+                CanvasHelper.drawText(ctx, `GPU${i}`, x - 8, y - 8, {
+                    font: 'bold 12px Arial',
+                    color: color === '#e0e0e0' ? '#666' : 'white'
+                });
+
+                // 数据值显示
+                const value = ((i + step) * 10 + 100) % 256;
+                CanvasHelper.drawText(ctx, value.toString(), x - 5, y + 5, {
+                    font: '10px Arial',
+                    color: color === '#e0e0e0' ? '#999' : 'white'
+                });
+            }
+
+            // 绘制环形连接
+            for (let i = 0; i < numGPU; i++) {
+                const angle1 = (i * 2 * Math.PI) / numGPU - Math.PI / 2;
+                const angle2 = (((i + 1) % numGPU) * 2 * Math.PI) / numGPU - Math.PI / 2;
+
+                const x1 = centerX + radius * Math.cos(angle1);
+                const y1 = centerY + radius * Math.sin(angle1);
+                const x2 = centerX + radius * Math.cos(angle2);
+                const y2 = centerY + radius * Math.sin(angle2);
+
+                CanvasHelper.drawArrow(ctx, x1, y1, x2, y2, '#999', {
+                    lineWidth: 1,
+                    headlen: 10
+                });
+            }
+
+            // 绘制当前传输
+            if (animationRunning) {
+                const fromAngle = (step * 2 * Math.PI) / numGPU - Math.PI / 2;
+                const toAngle = (((step + 1) % numGPU) * 2 * Math.PI) / numGPU - Math.PI / 2;
+
+                const fromX = centerX + radius * Math.cos(fromAngle);
+                const fromY = centerY + radius * Math.sin(fromAngle);
+                const toX = centerX + radius * Math.cos(toAngle);
+                const toY = centerY + radius * Math.sin(toAngle);
+
+                // 动画数据球
+                const progress = (frameCount % 20) / 20;
+                const ballX = fromX + (toX - fromX) * progress;
+                const ballY = fromY + (toY - fromY) * progress;
+
+                CanvasHelper.drawCircle(ctx, ballX, ballY, 8, '#ff6b6b', {
+                    stroke: '#333',
+                    lineWidth: 1
+                });
+            }
+
+            // 阶段信息
+            const phase = Math.floor(frameCount / 40) % 2;
+            const phaseName = phase === 0 ? 'Reduce-Scatter 阶段' : 'AllGather 阶段';
+            const phaseDesc = phase === 0 ? 
+                '第1-7轮：GPU间求和数据并传输' :
+                '第8-14轮：结果广播到所有GPU';
+
+            CanvasHelper.drawText(ctx, phaseName, centerX - 150, 20, {
+                font: 'bold 18px Arial',
+                color: '#333'
+            });
+
+            CanvasHelper.drawRect(ctx, 50, 420, 800, 70, '#f0f0f0', {
+                stroke: '#667eea',
+                lineWidth: 2
+            });
+
+            CanvasHelper.drawText(ctx, `当前阶段: ${phaseName}`, 70, 430, {
+                font: 'bold 14px Arial',
+                color: '#667eea'
+            });
+
+            CanvasHelper.drawText(ctx, phaseDesc, 70, 450, {
+                font: '12px Arial',
+                color: '#333'
+            });
+
+            CanvasHelper.drawText(ctx, `通讯轮数: ${Math.floor(frameCount / 20) + 1} / 14`, 70, 470, {
+                font: 'bold 12px Arial',
+                color: '#764ba2'
+            });
+
+            CanvasHelper.drawText(ctx, `数据一致性检查: ✓ (所有GPU数据相同)`, 70, 490, {
+                font: '12px Arial',
+                color: '#51cf66'
+            });
+        }
+
+        // ==================== GPU拓扑动画 ====================
+        function drawTopologyAnimation() {
+            const canvas = document.getElementById('topologyCanvas');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 背景
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#f8f9fa');
+            gradient.addColorStop(1, '#e9ecef');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 绘制GPU阵列 (2x4 网格)
+            const gpuSize = 60;
+            const gapX = 140;
+            const gapY = 120;
+            const startX = 100;
+            const startY = 80;
+
+            const gpus = [];
+            for (let i = 0; i < 2; i++) {
+                for (let j = 0; j < 4; j++) {
+                    gpus.push({
+                        x: startX + j * gapX,
+                        y: startY + i * gapY,
+                        id: i * 4 + j
+                    });
+                }
+            }
+
+            // 绘制连接拓扑
+            gpus.forEach((gpu, idx) => {
+                // NVLink 连接 (同一行相邻GPU)
+                if (idx % 4 !== 3) {
+                    const nextGpu = gpus[idx + 1];
+                    CanvasHelper.drawArrow(ctx, gpu.x + gpuSize, gpu.y + gpuSize / 2,
+                        nextGpu.x, nextGpu.y + gpuSize / 2, '#51cf66', {
+                        lineWidth: 3,
+                        headlen: 8
+                    });
+                    CanvasHelper.drawArrow(ctx, nextGpu.x, nextGpu.y + gpuSize / 2,
+                        gpu.x + gpuSize, gpu.y + gpuSize / 2, '#51cf66', {
+                        lineWidth: 3,
+                        headlen: 8
+                    });
+                }
+
+                // PCIe 连接 (同一列相邻GPU)
+                if (idx < 4) {
+                    const nextGpu = gpus[idx + 4];
+                    CanvasHelper.drawDashedLine(ctx, gpu.x + gpuSize / 2, gpu.y + gpuSize,
+                        nextGpu.x + gpuSize / 2, nextGpu.y, '#ff922b', {
+                        lineWidth: 2,
+                        dash: [5, 5]
+                    });
+                }
+            });
+
+            // 绘制GPU节点
+            gpus.forEach((gpu) => {
+                let color = '#e0e0e0';
+
+                if (animationRunning) {
+                    const activeGpu = Math.floor((frameCount / 5) % 8);
+                    if (gpu.id === activeGpu) {
+                        color = '#ff6b6b';
+                    } else if ([
+                        (activeGpu + 1) % 8,
+                        (activeGpu - 1 + 8) % 8
+                    ].includes(gpu.id)) {
+                        color = '#51cf66';
+                    }
+                }
+
+                CanvasHelper.drawRect(ctx, gpu.x, gpu.y, gpuSize, gpuSize, color, {
+                    stroke: '#333',
+                    lineWidth: 2
+                });
+
+                CanvasHelper.drawText(ctx, `GPU${gpu.id}`, gpu.x + 15, gpu.y + 22, {
+                    font: 'bold 14px Arial',
+                    color: color === '#e0e0e0' ? '#666' : 'white'
+                });
+            });
+
+            // 图例
+            CanvasHelper.drawText(ctx, '拓扑连接类型:', 50, 300, {
+                font: 'bold 14px Arial',
+                color: '#333'
+            });
+
+            const legend = [
+                { color: '#51cf66', text: 'NVLink (300GB/s)' },
+                { color: '#ff922b', text: 'PCIe 4.0 (32GB/s)' },
+                { color: '#ff6b6b', text: '活跃GPU' }
+            ];
+
+            legend.forEach((item, idx) => {
+                CanvasHelper.drawCircle(ctx, 80 + idx * 200, 340, 8, item.color);
+                CanvasHelper.drawText(ctx, item.text, 95 + idx * 200, 335, {
+                    font: '12px Arial',
+                    color: '#333'
+                });
+            });
+
+            // 性能指标表
+            const metrics = [
+                { label: 'NVLink 双向带宽', value: '600 GB/s' },
+                { label: 'PCIe 双向带宽', value: '32 GB/s' },
+                { label: '最大延迟 (NVLink)', value: '< 1μs' },
+                { label: '最大延迟 (PCIe)', value: '~2μs' }
+            ];
+
+            CanvasHelper.drawRect(ctx, 50, 380, 800, 110, '#f0f0f0', {
+                stroke: '#667eea',
+                lineWidth: 2
+            });
+
+            CanvasHelper.drawText(ctx, '拓扑性能参数:', 70, 390, {
+                font: 'bold 12px Arial',
+                color: '#667eea'
+            });
+
+            metrics.forEach((metric, idx) => {
+                const col = idx % 2;
+                const row = Math.floor(idx / 2);
+                const x = 70 + col * 400;
+                const y = 410 + row * 25;
+
+                CanvasHelper.drawText(ctx, metric.label + ':', x, y, {
+                    font: '11px Arial',
+                    color: '#333'
+                });
+                CanvasHelper.drawText(ctx, metric.value, x + 220, y, {
+                    font: 'bold 11px Arial',
+                    color: '#667eea'
+                });
+            });
+        }
+
+        // ==================== 集合操作对比动画 ====================
+        function drawCollectiveAnimation() {
+            const canvas = document.getElementById('collectiveCanvas');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 背景
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#f8f9fa');
+            gradient.addColorStop(1, '#e9ecef');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const operations = [
+                {
+                    name: 'AllReduce',
+                    description: '求和 + 广播',
+                    x: 50,
+                    gpuValues: [1, 2, 3, 4],
+                    resultValues: [10, 10, 10, 10],
+                    color: '#667eea'
+                },
+                {
+                    name: 'AllGather',
+                    description: '收集所有数据',
+                    x: 250,
+                    gpuValues: [[1], [2], [3], [4]],
+                    resultValues: [[1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4]],
+                    color: '#51cf66'
+                },
+                {
+                    name: 'Broadcast',
+                    description: '单播到所有',
+                    x: 450,
+                    gpuValues: [[5], [0], [0], [0]],
+                    resultValues: [[5], [5], [5], [5]],
+                    color: '#ff922b'
+                },
+                {
+                    name: 'ReduceScatter',
+                    description: '聚合后分散',
+                    x: 650,
+                    gpuValues: [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]],
+                    resultValues: [[1 + 5 + 9 + 13], [2 + 6 + 10 + 14], [3 + 7 + 11 + 15], [4 + 8 + 12 + 16]],
+                    color: '#ff6b6b'
+                }
+            ];
+
+            // 绘制每个操作
+            operations.forEach((op) => {
+                // 操作名称
+                CanvasHelper.drawText(ctx, op.name, op.x, 20, {
+                    font: 'bold 16px Arial',
+                    color: op.color
+                });
+
+                CanvasHelper.drawText(ctx, op.description, op.x, 40, {
+                    font: '11px Arial',
+                    color: '#999'
+                });
+
+                // 输入数据
+                CanvasHelper.drawText(ctx, '输入:', op.x, 70, {
+                    font: 'bold 12px Arial',
+                    color: '#333'
+                });
+
+                for (let i = 0; i < 4; i++) {
+                    const color = animationRunning && Math.floor(frameCount / 5) % 2 === 0 ? op.color : '#e0e0e0';
+                    CanvasHelper.drawRect(ctx, op.x, 90 + i * 30, 150, 25, color, {
+                        stroke: '#999',
+                        lineWidth: 1
+                    });
+                    CanvasHelper.drawText(ctx, `GPU${i}: ${typeof op.gpuValues[i] === 'number' ? op.gpuValues[i] : op.gpuValues[i].join(',')}`,
+                        op.x + 10, 100 + i * 30, {
+                        font: '11px Arial',
+                        color: color === '#e0e0e0' ? '#666' : 'white'
+                    });
+                }
+
+                // 箭头
+                CanvasHelper.drawArrow(ctx, op.x + 75, 210, op.x + 75, 240, '#999', {
+                    lineWidth: 2,
+                    headlen: 8
+                });
+
+                // 输出数据
+                CanvasHelper.drawText(ctx, '输出:', op.x, 250, {
+                    font: 'bold 12px Arial',
+                    color: '#333'
+                });
+
+                for (let i = 0; i < 4; i++) {
+                    const color = animationRunning && Math.floor(frameCount / 5) % 2 === 1 ? op.color : '#e0e0e0';
+                    CanvasHelper.drawRect(ctx, op.x, 270 + i * 30, 150, 25, color, {
+                        stroke: '#999',
+                        lineWidth: 1
+                    });
+                    CanvasHelper.drawText(ctx, `GPU${i}: ${typeof op.resultValues[i] === 'number' ? op.resultValues[i] : op.resultValues[i].join(',')}`,
+                        op.x + 10, 280 + i * 30, {
+                        font: '11px Arial',
+                        color: color === '#e0e0e0' ? '#666' : 'white'
+                    });
+                }
+
+                // 通信复杂度
+                const complexity = op.name === 'AllReduce' ? 'O(n log n)' :
+                    op.name === 'AllGather' ? 'O(n)' :
+                        op.name === 'Broadcast' ? 'O(log n)' : 'O(n log n)';
+
+                CanvasHelper.drawRect(ctx, op.x, 420, 150, 30, '#f0f0f0', {
+                    stroke: op.color,
+                    lineWidth: 1
+                });
+
+                CanvasHelper.drawText(ctx, `复杂度: ${complexity}`, op.x + 10, 428, {
+                    font: 'bold 11px Arial',
+                    color: op.color
+                });
+            });
+
+            // 底部说明
+            CanvasHelper.drawRect(ctx, 50, 470, 800, 20, '#f0f0f0', {
+                stroke: '#ddd',
+                lineWidth: 1
+            });
+
+            CanvasHelper.drawText(ctx, '💡 所有操作均支持多种数据类型 (float, double, int, etc.) 和归约操作 (sum, min, max, prod, etc.)',
+                60, 476, {
+                font: '11px Arial',
+                color: '#666'
+            });
+        }
+
+        // ==================== 主动画循环 ====================
+        function animate() {
+            if (animationRunning) {
+                frameCount++;
+            }
+
+            // 根据当前标签绘制
+            switch (currentTab) {
+                case 'architecture':
+                    drawArchitectureLayer();
+                    break;
+                case 'allreduce':
+                    drawAllReduceAnimation();
+                    break;
+                case 'topology':
+                    drawTopologyAnimation();
+                    break;
+                case 'collective':
+                    drawCollectiveAnimation();
+                    break;
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        // ==================== 控制函数 ====================
+        function startAnimation() {
+            animationRunning = true;
+            document.getElementById('startBtn').style.display = 'none';
+            document.getElementById('pauseBtn').style.display = 'inline-block';
+            document.getElementById('animationStatus').textContent = '运行中...';
+            document.getElementById('commStatus').textContent = 'ncclCommInitAll - 已初始化';
+        }
+
+        function pauseAnimation() {
+            animationRunning = false;
+            document.getElementById('startBtn').style.display = 'inline-block';
+            document.getElementById('pauseBtn').style.display = 'none';
+            document.getElementById('animationStatus').textContent = '已暂停';
+        }
+
+        function resetAnimation() {
+            animationRunning = false;
+            frameCount = 0;
+            document.getElementById('startBtn').style.display = 'inline-block';
+            document.getElementById('pauseBtn').style.display = 'none';
+            document.getElementById('animationStatus').textContent = '已停止';
+            document.getElementById('currentStep').textContent = '0';
+            document.getElementById('commStatus').textContent = '未初始化';
+        }
+
+        function changeSpeed(value) {
+            animationSpeed = parseFloat(value);
+            document.getElementById('speedValue').textContent = animationSpeed.toFixed(1) + 'x';
+        }
+
+        // ==================== 标签页切换 ====================
+        document.addEventListener('DOMContentLoaded', function () {
+            // 标签页切换
+            const tabButtons = document.querySelectorAll('.tab-btn');
+            tabButtons.forEach(btn => {
+                btn.addEventListener('click', function () {
+                    const tabName = this.getAttribute('data-tab');
+                    
+                    // 移除所有活跃状态
+                    tabButtons.forEach(b => b.classList.remove('active'));
+                    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+                    
+                    // 添加新的活跃状态
+                    this.classList.add('active');
+                    document.getElementById(tabName).classList.add('active');
+                    
+                    // 更新当前标签
+                    currentTab = tabName;
+                    const tabNameMap = {
+                        'architecture': '架构层次',
+                        'allreduce': 'AllReduce',
+                        'topology': 'GPU拓扑',
+                        'collective': '集合操作'
+                    };
+                    document.getElementById('currentTab').textContent = tabNameMap[tabName];
+                    
+                    // 重置计数器
+                    frameCount = 0;
+                });
+            });
+
+            // 启动动画循环
+            animate();
+        });
+
+        // 定期更新信息面板
+        setInterval(() => {
+            if (animationRunning) {
+                document.getElementById('currentStep').textContent = Math.floor(frameCount / 10);
+            }
+        }, 100);
+
+        // 键盘快捷键
+        document.addEventListener('keydown', function (e) {
+            if (e.code === 'Space') {
+                e.preventDefault();
+                if (animationRunning) {
+                    pauseAnimation();
+                } else {
+                    startAnimation();
+                }
+            } else if (e.code === 'KeyR') {
+                resetAnimation();
+            }
+        });
+    </script>
+</body>
+</html>
